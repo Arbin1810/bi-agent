@@ -1,0 +1,227 @@
+# ============================================
+# SECRETS & ENVIRONMENT
+# ============================================
+# CRITICAL: Never commit API keys or credentials
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+credentials.json
+service-account.json
+
+# ============================================
+# PYTHON
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ============================================
+# VIRTUAL ENVIRONMENTS
+# ============================================
+.venv/
+venv/
+ENV/
+env/
+.ENV/
+.python-version
+
+# ============================================
+# TESTING & COVERAGE
+# ============================================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+*.cover
+.cache
+nosetests.xml
+coverage.xml
+*.py,cover
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ============================================
+# PROJECT STORAGE (Generated Runtime Data)
+# ============================================
+# These directories hold user uploads, reports, and charts
+# that should never be committed to version control
+storage/uploads/*
+storage/reports/*
+storage/charts/*
+!storage/uploads/.gitkeep
+!storage/reports/.gitkeep
+!storage/charts/.gitkeep
+
+# Keep the .gitkeep files so the folder structure is preserved
+# but ignore all actual contents
+
+# ============================================
+# DATA FILES (Large datasets - use DVC or similar)
+# ============================================
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.sqlite
+*.sqlite3
+*.db
+data/
+datasets/
+raw_data/
+processed_data/
+
+# ============================================
+# LOGS
+# ============================================
+*.log
+logs/
+log/
+*.log.*
+
+# ============================================
+# DOCKER
+# ============================================
+# docker-compose overrides (may contain secrets)
+docker-compose.override.yml
+.dockerignore
+
+# ============================================
+# IDE & EDITORS
+# ============================================
+# VS Code
+.vscode/
+!.vscode/settings.json.example
+!.vscode/extensions.json
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Spyder
+.spyproject/
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+.\#
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# ============================================
+# OPERATING SYSTEM
+# ============================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ============================================
+# BUILD ARTIFACTS & CACHES
+# ============================================
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+*.pyo
+
+# ============================================
+# TEMPORARY FILES
+# ============================================
+*.tmp
+*.temp
+*.bak
+*.swp
+tmp/
+temp/
+
+# ============================================
+# MATPLOTLIB / SEABORN CACHE
+# ============================================
+.matplotlib/
+.fontconfig/
+
+# ============================================
+# NODE (if you add a frontend later)
+# ============================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dist/
+.next/
+.nuxt/
+
+# ============================================
+# MISC
+# ============================================
+*.orig
+*.rej
+.DS_Store
+tags
+TAGS
