@@ -1,0 +1,32 @@
+{
+  "anomaly_window": {
+    "start": "2026-08-01",
+    "end": "2026-08-31"
+  },
+  "injected_anomalies": [
+    {
+      "id": "A1",
+      "type": "regional_revenue_drop",
+      "target": "Region_A",
+      "expected_effect": "revenue drop ~30%"
+    },
+    {
+      "id": "A2",
+      "type": "product_margin_collapse",
+      "target": "P007",
+      "expected_effect": "profit margin 25% \u2192 8%"
+    },
+    {
+      "id": "A3",
+      "type": "branch_cancellation_spike",
+      "target": "Branch_D1",
+      "expected_effect": "cancellation 4% \u2192 15%"
+    },
+    {
+      "id": "A4",
+      "type": "segment_decline",
+      "target": "Occasional",
+      "expected_effect": "order volume \u2193 ~40%"
+    }
+  ]
+}
