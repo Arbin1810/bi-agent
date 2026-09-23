@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from pathlib import Path
 
+
 class Settings(BaseSettings):
     openai_api_key: str
     openai_model: str = "gpt-4o"
@@ -13,6 +14,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
     @property
     def uploads_dir(self) -> Path:
@@ -31,5 +33,6 @@ class Settings(BaseSettings):
         p = Path(self.storage_path) / "charts"
         p.mkdir(parents=True, exist_ok=True)
         return p
+
 
 settings = Settings()
