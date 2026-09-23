@@ -8,9 +8,11 @@ from app.agents.rootcause_agent import RootCauseAgent
 from app.agents.critic_agent import CriticAgent
 from app.agents.chart_agent import ChartAgent
 from app.agents.report_agent import ReportAgent
+from app.data.connectors import db
 from app.utils.logger import logger
 
 MAX_ITERATIONS = 2
+
 
 class BIWorkflow:
     def __init__(self):
@@ -42,9 +44,8 @@ class BIWorkflow:
             state = self.planner.run(state)
             state["trace"].append("plan")
 
-            # SQL path only if we have a DB
-            from app.data.connectors import db
-            if db.engine and not state.get("dataframe") is not None:
+            # Only run SQL path if we have a DB AND no dataframe provided
+            if db.engine is not None and state.get("dataframe") is None:
                 state = self.sql.run(state)
                 state["trace"].append("sql")
 
@@ -57,7 +58,6 @@ class BIWorkflow:
             state = self.rootcause.run(state)
             state["trace"].append("rootcause")
 
-            # Critic loop
             while state.get("iterations", 0) < MAX_ITERATIONS:
                 state = self.critic.run(state)
                 state["trace"].append(f"critic#{state['iterations']}")
@@ -65,8 +65,6 @@ class BIWorkflow:
                 if critique.get("is_complete", True):
                     break
                 state["iterations"] += 1
-                # In a full implementation, use critique.additional_analysis_needed
-                # to trigger targeted re-queries. For now we stop after one pass.
 
             state = self.chart.run(state)
             state["trace"].append("charts")
@@ -79,5 +77,6 @@ class BIWorkflow:
             state["error"] = str(e)
 
         return state
+
 
 workflow = BIWorkflow()
