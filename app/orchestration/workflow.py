@@ -45,7 +45,11 @@ class BIWorkflow:
             state["trace"].append("plan")
 
             # Only run SQL path if we have a DB AND no dataframe provided
-            if db.engine is not None and state.get("dataframe") is None:
+            # if db.engine is not None and state.get("dataframe") is None:
+            #     state = self.sql.run(state)
+            #     state["trace"].append("sql")
+            has_source = (db.engine is not None) or (state.get("dataframe") is not None)
+            if has_source:
                 state = self.sql.run(state)
                 state["trace"].append("sql")
 
