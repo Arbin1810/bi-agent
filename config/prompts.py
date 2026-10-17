@@ -265,61 +265,63 @@ REPORT_PROMPT = """You are a management report writer. Produce a concise executi
 
 User question: {question}
 
-AUTHORITATIVE HEADLINE NUMBERS (copy these VERBATIM — do NOT recompute,
-paraphrase, or round differently):
-- Target period: {headline_target}
-- Baseline period: {headline_baseline}
-- Total change: {headline_pct}%
-- Absolute change: {headline_abs}
-- Target total revenue: {headline_target_total}
-- Baseline total revenue: {headline_baseline_total}
+VERIFIED PAYLOAD (every number you write MUST appear verbatim in this
+JSON — do not invent, round differently, or paraphrase):
 
-Analysis findings (structured JSON):
-{findings}
-
-Root causes (already ranked by evidence):
-{root_causes}
-
-Anomalies detected (high/medium severity only):
-{anomalies}
+{verified_payload}
 
 Charts generated: {charts}
 Analyst confidence: {confidence}
 
 CRITICAL RULES:
-1. In "Overall Finding", use the EXACT headline numbers above. If the
-   question asks "why did revenue decline in August 2026", state the
-   percentage and dollar change verbatim.
-2. Every numeric claim in the report MUST come from the JSON above.
-   Do NOT invent percentages, dollar amounts, or entity names.
-3. In "Main Contributing Factors", cite the top 3-5 items from root_causes
-   by name and include their change_pct and contribution_pct.
-4. If anomalies list is empty, write "No high-severity anomalies detected."
-5. Do NOT cite the raw analysis JSON keys; write prose.
+1. Every numeric claim in the report MUST be quoted verbatim from the
+   payload. Do not compute new numbers. Do not sum across dimensions
+   (each dimension overlaps — the same transaction appears in one region
+   AND one product AND one branch AND one segment).
+2. You MUST use this exact four-section structure, in this order:
+
+   ## Observed Changes
+   Entity-level deltas from payload["deltas"]. One bullet per top-3
+   negative entity per dimension. Each bullet must include the entity
+   name, the baseline and target periods, and the change_pct from the
+   payload.
+
+   ## Measured Drivers
+   From payload["headline"] only. Report AOV change, transaction-count
+   change, and cancellation-rate change, all as deltas from the payload.
+   State explicitly whether volume or price drove the change.
+
+   ## Hypotheses to Investigate
+   Items the current analysis could NOT confirm. Do NOT include
+   numbers in this section. For each entry, name the specific
+   cross-tabulation or query that would confirm or refute it.
+
+   ## Known Limitations
+   Copy payload["known_limitations"] as bullets. Also, if any entry in
+   payload["known_scenarios"] has detected=false, add a bullet for it
+   that contains the phrase "not detected by current analysis" and the
+   entity name.
+
+3. Do NOT cite raw JSON key names in prose. Write in sentences.
+4. Do NOT add sections beyond the four named above, plus a title and a
+   period line.
+5. If payload["anomalies"] is empty, say so explicitly under Observed
+   Changes, and do NOT claim "no anomalies" — say "no revenue-scope
+   anomalies were flagged" to be honest about the detector's scope.
 
 Format (Markdown):
 
-# [Title — mention the target period]
+# Revenue Analysis — {confidence} confidence
 
-**Period:** {headline_target} vs {headline_baseline}
-
-## Overall Finding
-Revenue changed by {headline_pct}% ({headline_abs}) — {headline_baseline_total} → {headline_target_total}.
-
-## Main Contributing Factors
-1. ...
-2. ...
-3. ...
-
-## Evidence
+## Observed Changes
 - ...
 
-## Anomalies Detected
+## Measured Drivers
 - ...
 
-## Recommended Investigation
+## Hypotheses to Investigate
 - ...
 
-## Confidence
-High/Medium/Low — reason
+## Known Limitations
+- ...
 """
