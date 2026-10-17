@@ -1,13 +1,12 @@
 from app.data.connectors import db
-from app.data.file_handler import file_handler, FileHandler
-from pathlib import Path
-from typing import Any
+from app.data.file_handler import file_handler
+import pandas as pd
 
 
 class SchemaIntrospector:
     """Combines DB schema + uploaded files into unified schema context."""
 
-    def build_context(self, uploaded_files: list[dict[str, Any]] | None = None) -> str:
+    def build_context(self, uploaded_files=None):
         parts = []
 
         # DB schema
@@ -23,16 +22,19 @@ class SchemaIntrospector:
             parts.append("\n=== Uploaded Files ===")
             for f in uploaded_files:
                 loaded = file_handler.load(f["path"])
-                # Human-readable description (existing behavior)
+                # Human-readable description (kept from previous behavior)
                 parts.append(file_handler.to_schema_description(loaded))
 
-                # Fix 1.3: Also emit the schema under the SQL table aliases that
-                # DataFrameSQLExecutor registers (transactions / sales_data / df / data).
-                # Without this, the SQL agent sees no table and hallucinates names.
-                if hasattr(loaded, "columns"):
-                    col_str = ", ".join(
-                        f"{c} ({loaded[c].dtype})" for c in loaded.columns
-                    )
+                # FIX (Step 2.1): file_handler.load() returns a dict of the
+                # form {"df": DataFrame, "name": str, "type": str}. The previous
+                # `hasattr(loaded, "columns")` check was always False because
+                # dicts don't have a `.columns` attribute, so the "Queryable
+                # table" line never reached the SQL agent — it then invented
+                # table names like `sales` or `orders` and every query failed
+                # with `no such table`.
+                df = loaded.get("df") if isinstance(loaded, dict) else None
+                if isinstance(df, pd.DataFrame) and len(df.columns) > 0:
+                    col_str = ", ".join(f"{c} ({df[c].dtype})" for c in df.columns)
                     parts.append(
                         f"Queryable table `transactions` (aliases: "
                         f"`sales_data`, `df`, `data`): {col_str}"
