@@ -3,12 +3,16 @@ from pathlib import Path
 
 
 class Settings(BaseSettings):
-    openai_api_key: str
-    openai_model: str = "gpt-4o-mini"
-    openai_embedding_model: str = "text-embedding-3-small"
-    openai_base_url: str = ""
+    # ----- LLM -----
+    openai_api_key: str = "ollama-local"          # ignored by Ollama; required by SDK
+    openai_model: str = "llama3.1"                # must match `ollama list`
+    openai_embedding_model: str = "nomic-embed-text"  # Ollama embedding model (see note)
+    openai_base_url: str = "http://localhost:11434/v1"  # default to Ollama
 
-    database_url: str = ""
+    # ----- Database -----
+    database_url: str = ""                        # empty => CSV mode
+
+    # ----- Storage -----
     storage_path: str = "./storage"
     max_upload_size_mb: int = 100
     log_level: str = "INFO"
