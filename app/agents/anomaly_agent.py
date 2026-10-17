@@ -1,9 +1,26 @@
 import json
-import pandas as pd
+
 import numpy as np
+import pandas as pd
+
 from app.agents.base_agent import BaseAgent
 from config.prompts import ANOMALY_PROMPT
 from app.analysis.anomaly import detect_anomalies
+
+
+# Known scenarios from the dataset generator. Used only to check honesty —
+# if a scenario is injected but not detected, we say so, rather than
+# claiming "no anomalies found".
+KNOWN_SCENARIOS = [
+    {"id": "A1", "dimension": "region", "entity": "Region_A",
+     "metric": "revenue", "direction": "down"},
+    {"id": "A2", "dimension": "product_id", "entity": "P007",
+     "metric": "cost_ratio", "direction": "up"},
+    {"id": "A3", "dimension": "branch", "entity": "Branch_D1",
+     "metric": "cancel_rate", "direction": "up"},
+    {"id": "A4", "dimension": "customer_segment", "entity": "Occasional",
+     "metric": "quantity", "direction": "down"},
+]
 
 
 class AnomalyAgent(BaseAgent):
@@ -12,12 +29,14 @@ class AnomalyAgent(BaseAgent):
     def run(self, state: dict) -> dict:
         self.log("Detecting anomalies")
 
-        # Fix: avoid `or` short-circuit on DataFrames (raises on truth-value check)
         df = state.get("data")
         if df is None:
             df = state.get("dataframe")
 
-        # Fix 5: compute real z-scores from SQL results when available
+        # ----------------------------------------------------------
+        # Monthly totals z-score (kept — still useful for whole-month
+        # step changes).
+        # ----------------------------------------------------------
         sql_results = state.get("sql_results") or []
         computed = {}
 
@@ -45,10 +64,81 @@ class AnomalyAgent(BaseAgent):
                         computed["baseline_mean"] = float(mean)
                         computed["baseline_std"] = float(std)
 
-        # Statistical scan on numeric columns (if we have a DataFrame)
+        # ----------------------------------------------------------
+        # FIX (Step 3.3): cross-entity robust z-scores at the target
+        # month.
+        #
+        # The previous version used sample mean and std. That has two
+        # problems on the small dimension populations we see (typically
+        # 5–50 entities per dimension):
+        #   1. std of 2 entities is undefined behavior for outlier
+        #      detection — every point looks like ±1, so nothing flags.
+        #      We keep the >= 3 guard as a floor.
+        #   2. On any sample size, std is dominated by the very
+        #      outlier we're trying to detect (masking effect). A −30%
+        #      drop inflates std so much that its own z-score falls
+        #      below the threshold.
+        #
+        # Use median-absolute-deviation (MAD) instead. Median is robust
+        # to the outlier, so the scale stays honest. The 0.6745
+        # constant rescales MAD to be σ-comparable for normal data,
+        # preserving the |z| > 2 interpretation.
+        # ----------------------------------------------------------
+        dimension_deltas = state.get("dimension_deltas") or {}
+        entity_anomalies = []
+        MAD_SCALE = 0.6745
+        for dim, entities in dimension_deltas.items():
+            if len(entities) < 3:
+                continue
+            pcts = np.array([d["change_pct"] for d in entities], dtype=float)
+            med = float(np.median(pcts))
+            mad = float(np.median(np.abs(pcts - med)))
+            if mad == 0:
+                # All entities moved by the same amount — no outlier
+                # signal. Falling back to std here would recreate the
+                # masking problem, so skip the dimension entirely.
+                continue
+            for d in entities:
+                rz = MAD_SCALE * (d["change_pct"] - med) / mad
+                if abs(rz) > 2:
+                    entity_anomalies.append({
+                        "dimension": dim,
+                        "entity": d["entity"],
+                        "change_pct": d["change_pct"],
+                        "robust_z_score": float(rz),
+                        "dimension_median_pct": med,
+                        "dimension_mad": mad,
+                        "direction": "down" if d["change_pct"] < med else "up",
+                        "baseline_value": d["baseline_value"],
+                        "target_value": d["target_value"],
+                        "method": "cross_entity_mad_zscore",
+                    })
+        if entity_anomalies:
+            computed["entity_anomalies"] = entity_anomalies
+            self.log(f"Entity robust z-scores flagged {len(entity_anomalies)} anomalies")
+
+        # ----------------------------------------------------------
+        # Known-scenario honesty check: for each scenario, is there any
+        # anomaly in our output that matches (dimension, entity)?
+        # ----------------------------------------------------------
+        detected_keys = {(a["dimension"], a["entity"]) for a in entity_anomalies}
+        scenario_check = []
+        for s in KNOWN_SCENARIOS:
+            hit = (s["dimension"], s["entity"]) in detected_keys
+            scenario_check.append({
+                "scenario_id": s["id"],
+                "dimension": s["dimension"],
+                "entity": s["entity"],
+                "expected_metric": s["metric"],
+                "expected_direction": s["direction"],
+                "detected_by_cross_entity_zscore": hit,
+            })
+        computed["known_scenario_check"] = scenario_check
+
+        # Statistical scan on numeric columns
         stats_anomalies = detect_anomalies(df) if df is not None and not df.empty else []
 
-        # Build a month-over-month revenue summary if date + revenue exist
+        # Month-over-month revenue summary
         mom_summary = {}
         if df is not None and not df.empty:
             try:
@@ -63,14 +153,14 @@ class AnomalyAgent(BaseAgent):
                         avg_order_value=("revenue", "mean"),
                         cancellation_rate=(
                             "order_status",
-                            lambda s: (s == "Cancelled").mean() if "order_status" in d.columns else None,
+                            lambda s: (s == "Cancelled").mean()
+                            if "order_status" in d.columns else None,
                         ),
                     ).reset_index()
                     mom_summary = grp.to_dict(orient="records")
             except Exception as e:
                 self.log(f"MoM summary failed: {e}")
 
-        # Merge computed z-scores + statistical hits into the summary
         summary_payload = {
             "computed": computed,
             "statistical_hits": stats_anomalies,
@@ -84,16 +174,11 @@ class AnomalyAgent(BaseAgent):
         )
         result = self.llm.complete_json(prompt)
 
-        # Force these to be from real computations, not LLM guesses
         result["computed_statistics"] = computed
         result["statistical_hits"] = stats_anomalies
         result["monthly_summary"] = mom_summary
 
-        # ----------------------------------------------------------
-        # Deduplicate: same (entity, period, value) with different labels.
-        # The LLM often emits the same data point 3-4 times, once per
-        # anomaly_type, producing noise in the report.
-        # ----------------------------------------------------------
+        # Deduplicate
         seen = set()
         deduped = []
         for a in result.get("anomalies", []):
@@ -107,7 +192,6 @@ class AnomalyAgent(BaseAgent):
         state["anomalies"] = result
 
         if df is None or (hasattr(df, "empty") and df.empty):
-            # No DataFrame — but we may still have real anomalies from SQL
             if not computed:
                 state["anomalies"] = {"anomalies": [], "method": "none"}
         return state

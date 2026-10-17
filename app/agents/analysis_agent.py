@@ -1,4 +1,7 @@
 import json
+
+import pandas as pd
+
 from app.agents.base_agent import BaseAgent
 from config.prompts import ANALYSIS_PROMPT
 
@@ -131,11 +134,7 @@ class AnalysisAgent(BaseAgent):
                 result["key_findings"] = findings
 
             # ----------------------------------------------------------
-            # SCHEMA ENFORCEMENT: keep only keys we control. The LLM
-            # sometimes emits CamelCase alternates ("Overall Summary",
-            # "Key Findings") that duplicate our snake_case overrides
-            # with hallucinated numbers. Drop everything not in our
-            # approved schema so downstream agents only see the truth.
+            # SCHEMA ENFORCEMENT: keep only keys we control.
             # ----------------------------------------------------------
             ALLOWED = {
                 "overall_summary",
@@ -149,7 +148,25 @@ class AnalysisAgent(BaseAgent):
             result = {k: v for k, v in result.items() if k in ALLOWED}
 
             state["analysis"] = result
-            state["data"] = None
+
+            # ----------------------------------------------------------
+            # FIX (Step 3.1): do NOT set state["data"] = None here.
+            # ChartAgent reads state["data"] and bails out if it's None,
+            # so multi-query runs produced zero charts. Populate it from
+            # the first NON-headline result (headline is only 2 rows —
+            # useless for charting), falling back to the original frame.
+            # ----------------------------------------------------------
+            chart_src = next(
+                (r for r in sql_results
+                 if not r.get("purpose", "").startswith("HEADLINE")
+                 and r.get("rows")),
+                None,
+            )
+            if chart_src is not None:
+                state["data"] = pd.DataFrame(chart_src["rows"])
+            else:
+                state["data"] = state.get("dataframe")
+
             return state
 
         # Fallback: single SQL (unchanged)
