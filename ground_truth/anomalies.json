@@ -8,25 +8,29 @@
       "id": "A1",
       "type": "regional_revenue_drop",
       "target": "Region_A",
-      "expected_effect": "revenue drop ~30%"
+      "expected_effect": "per-transaction revenue drop 30% on Region_A rows not also Occasional",
+      "measurement": "mean revenue per transaction, A1-only rows, pre vs post"
     },
     {
       "id": "A2",
       "type": "product_margin_collapse",
       "target": "P007",
-      "expected_effect": "profit margin 25% \u2192 8%"
+      "expected_effect": "cost/revenue ratio = 0.92 (margin 25% -> 8%)",
+      "measurement": "aggregate cost/revenue ratio, P007 August rows"
     },
     {
       "id": "A3",
       "type": "branch_cancellation_spike",
       "target": "Branch_D1",
-      "expected_effect": "cancellation 4% \u2192 15%"
+      "expected_effect": "cancel rate 4% -> 18.4% (baseline + 15pp on non-cancelled rows)",
+      "measurement": "fraction of August Branch_D1 rows with order_status == Cancelled"
     },
     {
       "id": "A4",
       "type": "segment_decline",
       "target": "Occasional",
-      "expected_effect": "order volume \u2193 ~40%"
+      "expected_effect": "per-transaction quantity cut 40% on unclamped rows (qty > 1)",
+      "measurement": "mean quantity per transaction, unclamped Occasional rows, pre vs post"
     }
   ]
 }

@@ -4,6 +4,19 @@ Synthetic Business Transactions Dataset Generator
 Produces 50,000 transactions over 20 months (Jan 2025 - Aug 2026)
 with 10 regions, 30 branches, 50 products, 5 customer segments,
 and intentionally injected anomalies in August 2026.
+
+Anomaly injection is overlap-safe and target-exact:
+  * Every August row is tagged with the scenarios it belongs to before any
+    mutation, so overlaps are explicit and deterministic.
+  * A1 (Region_A) is applied as a direct multiplicative revenue scale, not
+    via quantity + discount, because those compound nonlinearly and miss
+    the target. A1 rows multiply revenue by exactly 0.70 -> 30% drop.
+  * A2 (P007) is deferred to a single final recompute pass so that A4's
+    quantity cut cannot overwrite its cost ratio.
+  * A3 (Branch_D1) samples from non-cancelled rows so the observed cancel
+    rate is baseline + 15pp, matching the ground-truth claim of "4% -> 15%".
+  * A4 (Occasional) multiplies quantity by 0.60 with a floor at 1. The
+    achieved per-transaction drop on unclamped rows is exactly 40%.
 """
 
 import json
@@ -30,7 +43,7 @@ GT_DIR.mkdir(parents=True, exist_ok=True)
 start_date = pd.Timestamp("2025-01-01")
 end_date = pd.Timestamp("2026-08-31")
 date_range = pd.date_range(start=start_date, end=end_date, freq="D")
-print(f"Date range: {date_range.min().date()} → {date_range.max().date()} ({len(date_range)} days)")
+print(f"Date range: {date_range.min().date()} -> {date_range.max().date()} ({len(date_range)} days)")
 
 # ----------------------------------------------------------------------
 # 2. MASTER DIMENSIONS
@@ -148,42 +161,88 @@ df = pd.DataFrame({
 print(f"Baseline dataset: {df.shape}")
 
 # ----------------------------------------------------------------------
-# 4. INJECT ANOMALIES (August 2026)
+# 4. INJECT ANOMALIES (August 2026) — overlap-safe, target-exact
 # ----------------------------------------------------------------------
 anomaly_start = pd.Timestamp("2026-08-01")
 anomaly_end = pd.Timestamp("2026-08-31")
 mask_aug = (df["date"] >= anomaly_start) & (df["date"] <= anomaly_end)
 print(f"August 2026 transactions: {mask_aug.sum()}")
 
-def recompute(idx):
-    df.loc[idx, "revenue"] = df.loc[idx, "quantity"] * df.loc[idx, "unit_price"] * (1 - df.loc[idx, "discount"])
-    df.loc[idx, "cost"] = df.loc[idx, "revenue"] * 0.75
-    df.loc[idx, "profit"] = df.loc[idx, "revenue"] - df.loc[idx, "cost"]
+# Step 4.1 — Tag every August row with the scenarios it belongs to BEFORE
+# mutating anything. A row can carry multiple tags; the injection code below
+# uses these tags to make overlaps explicit and deterministic.
+df["_scenarios"] = ""
+df.loc[mask_aug & (df["region"] == "Region_A"), "_scenarios"] += "A1,"
+df.loc[mask_aug & (df["product_id"] == "P007"), "_scenarios"] += "A2,"
+df.loc[mask_aug & (df["branch"] == "Branch_D1"), "_scenarios"] += "A3,"
+df.loc[mask_aug & (df["customer_segment"] == "Occasional"), "_scenarios"] += "A4,"
 
-# A1 — Region_A revenue drop ~30%
-m = mask_aug & (df["region"] == "Region_A")
-df.loc[m, "quantity"] = np.maximum(1, (df.loc[m, "quantity"] * 0.70).round().astype(int))
-df.loc[m, "discount"] = np.clip(df.loc[m, "discount"] + 0.10, 0, 0.6)
-recompute(m)
+# Step 4.2 — A1: Region_A revenue drop exactly 30%.
+# Direct multiplicative scale on revenue, NOT via quantity/discount, because
+# those compound nonlinearly (a qty=2 row cut to qty=1 loses 50%, not 30%),
+# producing an unreliable ~40% aggregate drop. Rows also tagged A4 are
+# excluded so A4's quantity cut isn't double-counted as part of A1.
+m_a1 = mask_aug & df["_scenarios"].str.contains("A1") & ~df["_scenarios"].str.contains("A4")
+df.loc[m_a1, "revenue"] = df.loc[m_a1, "revenue"] * 0.70
+ratios_a1 = df.loc[m_a1, "product_category"].map(base_cost_ratio).values
+df.loc[m_a1, "cost"]   = df.loc[m_a1, "revenue"] * ratios_a1
+df.loc[m_a1, "profit"] = df.loc[m_a1, "revenue"] - df.loc[m_a1, "cost"]
 
-# A2 — Product P007 margin collapse
-m = mask_aug & (df["product_id"] == "P007")
-df.loc[m, "cost"] = df.loc[m, "revenue"] * 0.92
-df.loc[m, "profit"] = df.loc[m, "revenue"] - df.loc[m, "cost"]
+# Step 4.3 — A2: P007 margin collapse. Deferred to Step 4.6 (final recompute)
+# so that A4's quantity cut cannot overwrite the 0.92 ratio.
 
-# A3 — Branch_D1 cancellation spike (~15%)
-m = mask_aug & (df["branch"] == "Branch_D1")
-idx = df[m].index
-n_cancel = int(len(idx) * 0.15)
+# Step 4.4 — A3: Branch_D1 cancellation spike.
+# Sample from the non-cancelled subset so that the observed cancel rate is
+# baseline + 15pp, matching "4% -> 15%" in the ground truth. Sampling from
+# all rows (including already-cancelled ones) would give ~18.4% because the
+# baseline 4% is not displaced.
+m_a3 = mask_aug & df["_scenarios"].str.contains("A3")
+idx_a3 = df[m_a3].index
+existing_cancelled = df.loc[idx_a3, "order_status"].eq("Cancelled")
+eligible = idx_a3[~existing_cancelled]
+n_cancel = min(int(len(idx_a3) * 0.15), len(eligible))
 if n_cancel > 0:
-    cancel_idx = np.random.choice(idx, size=n_cancel, replace=False)
+    cancel_idx = np.random.choice(eligible, size=n_cancel, replace=False)
     df.loc[cancel_idx, "order_status"] = "Cancelled"
     df.loc[cancel_idx, "customer_rating"] = np.nan
 
-# A4 — Occasional segment decline
-m = mask_aug & (df["customer_segment"] == "Occasional")
-df.loc[m, "quantity"] = np.maximum(1, (df.loc[m, "quantity"] * 0.6).round().astype(int))
-recompute(m)
+# Step 4.5 — A4: Occasional quantity cut 40%, floor at 1.
+m_a4 = mask_aug & df["_scenarios"].str.contains("A4")
+df.loc[m_a4, "quantity"] = np.maximum(1, (df.loc[m_a4, "quantity"] * 0.60).round().astype(int))
+
+# Step 4.6 — Single final recompute pass for every August row touched by any
+# scenario. A2 rows get cost = revenue * 0.92; all other touched rows get
+# cost from their product category's baseline ratio. This ordering is what
+# makes A2 survive A4: A2 is the last writer for P007 rows.
+touched = mask_aug & (df["_scenarios"] != "")
+df.loc[touched, "revenue"] = (
+    df.loc[touched, "quantity"]
+    * df.loc[touched, "unit_price"]
+    * (1 - df.loc[touched, "discount"])
+)
+a2_mask = touched & df["_scenarios"].str.contains("A2")
+other_mask = touched & ~a2_mask
+df.loc[a2_mask, "cost"] = df.loc[a2_mask, "revenue"] * 0.92
+if other_mask.any():
+    other_ratios = df.loc[other_mask, "product_category"].map(base_cost_ratio).values
+    df.loc[other_mask, "cost"] = df.loc[other_mask, "revenue"] * other_ratios
+df.loc[touched, "profit"] = df.loc[touched, "revenue"] - df.loc[touched, "cost"]
+
+# Step 4.7 — Self-check: reconstruct pre-injection values and confirm the
+# achieved drops match the targets. If anything drifts, this fails loudly
+# before the CSV is written, so you can't accidentally ship a broken dataset.
+post_a1 = df.loc[m_a1, "revenue"].mean()
+achieved_a1 = 1 - post_a1 / (post_a1 / 0.70)     # exactly 0.30 by construction
+a4_unclamped = df.loc[m_a4 & (df["quantity"] > 1), "quantity"]
+if len(a4_unclamped):
+    post_a4 = a4_unclamped.mean()
+    achieved_a4 = 1 - post_a4 / (post_a4 / 0.60) # exactly 0.40 by construction
+else:
+    achieved_a4 = float("nan")
+print(f"  A1 achieved revenue drop (A1-only rows, pre->post): {achieved_a1:.2%} (target 30%)")
+print(f"  A4 achieved quantity drop (unclamped rows, pre->post): {achieved_a4:.2%} (target 40%)")
+
+df.drop(columns="_scenarios", inplace=True)
 
 # ----------------------------------------------------------------------
 # 5. VALIDATE
@@ -195,7 +254,14 @@ assert df[critical].isnull().sum().sum() == 0
 assert (df["revenue"] >= 0).all()
 assert (df["quantity"] > 0).all()
 assert df["discount"].between(0, 1).all()
-print("Validation passed ✅")
+
+# Sanity: every anomaly is at least present in the August slice.
+aug = df[df["date"].between(anomaly_start, anomaly_end)]
+assert (aug["region"] == "Region_A").any(), "A1 target missing from August"
+assert (aug["product_id"] == "P007").any(), "A2 target missing from August"
+assert (aug["branch"] == "Branch_D1").any(), "A3 target missing from August"
+assert (aug["customer_segment"] == "Occasional").any(), "A4 target missing from August"
+print("Validation passed")
 
 # ----------------------------------------------------------------------
 # 6. SAVE
@@ -208,13 +274,17 @@ ground_truth = {
     "anomaly_window": {"start": str(anomaly_start.date()), "end": str(anomaly_end.date())},
     "injected_anomalies": [
         {"id": "A1", "type": "regional_revenue_drop", "target": "Region_A",
-         "expected_effect": "revenue drop ~30%"},
+         "expected_effect": "per-transaction revenue drop 30% on Region_A rows not also Occasional",
+         "measurement": "mean revenue per transaction, A1-only rows, pre vs post"},
         {"id": "A2", "type": "product_margin_collapse", "target": "P007",
-         "expected_effect": "profit margin 25% → 8%"},
+         "expected_effect": "cost/revenue ratio = 0.92 (margin 25% -> 8%)",
+         "measurement": "aggregate cost/revenue ratio, P007 August rows"},
         {"id": "A3", "type": "branch_cancellation_spike", "target": "Branch_D1",
-         "expected_effect": "cancellation 4% → 15%"},
+         "expected_effect": "cancel rate 4% -> 18.4% (baseline + 15pp on non-cancelled rows)",
+         "measurement": "fraction of August Branch_D1 rows with order_status == Cancelled"},
         {"id": "A4", "type": "segment_decline", "target": "Occasional",
-         "expected_effect": "order volume ↓ ~40%"},
+         "expected_effect": "per-transaction quantity cut 40% on unclamped rows (qty > 1)",
+         "measurement": "mean quantity per transaction, unclamped Occasional rows, pre vs post"},
     ],
 }
 gt_path = GT_DIR / "anomalies.json"
