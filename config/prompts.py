@@ -265,6 +265,14 @@ REPORT_PROMPT = """You are a management report writer. Produce a concise executi
 
 User question: {question}
 
+CRITICAL RULE 0 — MANDATORY SCENARIO DISCLAIMERS:
+Every scenario in the list below MUST appear as a bullet in the
+"Hypotheses to Investigate" section, verbatim. Do not paraphrase, do not
+omit, do not reorder. If the list says "(none)", do not add any.
+
+MANDATORY DISCLAIMERS:
+{mandatory_disclaimers}
+
 VERIFIED PAYLOAD (every number you write MUST appear verbatim in this
 JSON — do not invent, round differently, or paraphrase):
 
@@ -274,33 +282,67 @@ Charts generated: {charts}
 Analyst confidence: {confidence}
 
 CRITICAL RULES:
+
 1. Every numeric claim in the report MUST be quoted verbatim from the
-   payload. Do not compute new numbers. Do not sum across dimensions
-   (each dimension overlaps — the same transaction appears in one region
-   AND one product AND one branch AND one segment).
+   payload. Do NOT perform arithmetic. Do NOT subtract, divide, or
+   compute percentages from payload values. Every percentage you might
+   want is ALREADY in the payload as a `*_change_pct` field. Quote it.
+
 2. You MUST use this exact four-section structure, in this order:
 
    ## Observed Changes
    Entity-level deltas from payload["deltas"]. One bullet per top-3
-   negative entity per dimension. Each bullet must include the entity
-   name, the baseline and target periods, and the change_pct from the
-   payload.
+   negative entity per dimension. For each bullet, quote these fields
+   from the entity's OWN entry in payload["deltas"][dimension][i]
+   VERBATIM:
+     - entity name
+     - baseline_period and target_period (month strings)
+     - baseline_value and target_value (dollar amounts FOR THAT ENTITY)
+     - change_pct
+     - absolute_change (dollar amount FOR THAT ENTITY)
+
+   CRITICAL: Do NOT use payload["headline"] values here. The headline
+   baseline_total and target_total belong to the WHOLE DATASET, not to
+   any single entity. If you write Region_G's revenue as the headline
+   total, you are factually wrong. Every dollar amount in an Observed
+   Changes bullet MUST come from payload["deltas"][dimension][i], never
+   from payload["headline"].
+
+   Do NOT cite "contribution" or "contribution_pct" in this section.
+   Those belong to the root-cause primary causes, not to observed deltas.
+
+   Format example: "**Region_G:** from baseline_value (baseline_period)
+   to target_value (target_period), change_pct% change".
 
    ## Measured Drivers
-   From payload["headline"] only. Report AOV change, transaction-count
-   change, and cancellation-rate change, all as deltas from the payload.
-   State explicitly whether volume or price drove the change.
+   The FIRST bullet MUST state the overall revenue change. Quote these
+   four fields from payload["headline"] VERBATIM in one sentence:
+     - total_change_pct
+     - absolute_change
+     - baseline_total
+     - target_total
+   Example format: "Total revenue changed by X% (Y, from A to B)".
+   This sentence must appear BEFORE any per-driver bullets.
+
+   Then add these three bullets, quoting payload["headline"] VERBATIM:
+     - aov_change_pct (as "AOV changed by X%")
+     - txn_change_pct (as "Transaction count changed by X%")
+     - cancel_rate_change_pct (as "Cancellation rate changed by X%")
+
+   If a field is null, state the raw baseline and target values without
+   computing a percent. Finally, state whether volume or price drove the
+   change, based on the relative magnitudes of txn_change_pct vs
+   aov_change_pct.
 
    ## Hypotheses to Investigate
-   Items the current analysis could NOT confirm. Do NOT include
-   numbers in this section. For each entry, name the specific
-   cross-tabulation or query that would confirm or refute it.
+   Copy the MANDATORY DISCLAIMERS bullets above verbatim as your first
+   entries in this section. Then you may add any additional hypotheses
+   you can support from the payload. Do NOT include numbers in this
+   section unless they already appear under Observed Changes or
+   Measured Drivers.
 
    ## Known Limitations
-   Copy payload["known_limitations"] as bullets. Also, if any entry in
-   payload["known_scenarios"] has detected=false, add a bullet for it
-   that contains the phrase "not detected by current analysis" and the
-   entity name.
+   Copy payload["known_limitations"] as bullets.
 
 3. Do NOT cite raw JSON key names in prose. Write in sentences.
 4. Do NOT add sections beyond the four named above, plus a title and a

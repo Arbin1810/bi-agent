@@ -13,12 +13,22 @@ KNOWN_SCENARIOS = [
     {"id": "A1", "dimension": "region", "entity": "Region_A",
      "description": "Region_A revenue drop"},
     {"id": "A2", "dimension": "product_id", "entity": "P007",
-     "description": "P007 margin collapse (cost/revenue → 0.92)"},
+     "description": "P007 margin collapse (cost/revenue -> 0.92)"},
     {"id": "A3", "dimension": "branch", "entity": "Branch_D1",
      "description": "Branch_D1 cancellation spike"},
     {"id": "A4", "dimension": "customer_segment", "entity": "Occasional",
      "description": "Occasional segment volume decline"},
 ]
+
+
+def _pct_change(base, target):
+    """Percentage change from base to target, rounded to 2 decimals."""
+    try:
+        b = float(base)
+        t = float(target)
+        return round((t - b) / b * 100, 2) if b else None
+    except (TypeError, ValueError):
+        return None
 
 
 class ReportAgent(BaseAgent):
@@ -34,6 +44,7 @@ class ReportAgent(BaseAgent):
         prompt = REPORT_PROMPT.format(
             question=state["question"],
             verified_payload=self._serialize_payload(payload),
+            mandatory_disclaimers=self._format_disclaimers(payload),
             charts=[c["path"] for c in state.get("charts", [])],
             confidence=state.get("critique", {}).get("confidence", "medium"),
         )
@@ -41,13 +52,19 @@ class ReportAgent(BaseAgent):
         report = self.llm.complete(prompt, temperature=0.3)
 
         # ----------------------------------------------------------
-        # Post-generation validation: every number must be traceable.
+        # Post-generation validation: every number must be traceable
+        # AND every named entity must exist in the payload.
         # ----------------------------------------------------------
         validation = self._validate_report(report, payload)
         if validation["untraceable_numbers"]:
             self.log(
                 f"WARNING: report contains untraceable numbers: "
-                f"{sorted(validation['untraceable_numbers'])}"
+                f"{validation['untraceable_numbers']}"
+            )
+        if validation["untraceable_entities"]:
+            self.log(
+                f"WARNING: report names entities not in payload: "
+                f"{validation['untraceable_entities']}"
             )
         if validation["missing_scenario_disclaimers"]:
             self.log(
@@ -69,21 +86,21 @@ class ReportAgent(BaseAgent):
         return state
 
     # ----------------------------------------------------------
-    # Step 4.1 — Build the structured, deterministic payload.
+    # Build the structured, deterministic payload.
     # ----------------------------------------------------------
     def _build_verified_payload(self, state: dict) -> dict:
-        """Every number the report may cite must live in here."""
         payload = {
             "headline": None,
             "deltas": {},
             "root_causes": [],
             "anomalies": [],
             "known_scenarios": [],
+            "mandatory_disclaimers": [],
             "known_limitations": [],
             "confidence": state.get("critique", {}).get("confidence", "medium"),
         }
 
-        # 1. Headline
+        # 1. Headline — with derived change-pct fields
         os_ = (state.get("analysis") or {}).get("overall_summary") or {}
         if os_:
             payload["headline"] = {
@@ -95,16 +112,39 @@ class ReportAgent(BaseAgent):
                 "total_change_pct": os_.get("total_change_pct"),
                 "baseline_aov": os_.get("baseline_aov"),
                 "target_aov": os_.get("target_aov"),
+                "aov_change_pct": _pct_change(
+                    os_.get("baseline_aov"), os_.get("target_aov")
+                ),
                 "baseline_txn_count": os_.get("baseline_txn_count"),
                 "target_txn_count": os_.get("target_txn_count"),
+                "txn_change_pct": _pct_change(
+                    os_.get("baseline_txn_count"), os_.get("target_txn_count")
+                ),
                 "baseline_cancel_rate": os_.get("baseline_cancel_rate"),
                 "target_cancel_rate": os_.get("target_cancel_rate"),
+                "cancel_rate_change_pct": _pct_change(
+                    os_.get("baseline_cancel_rate"), os_.get("target_cancel_rate")
+                ),
             }
 
-        # 2. Deltas — top 5 most-negative per dimension
+        # 2. Deltas — top-5 most-negative PLUS bottom-3 most-positive per
+        # dimension, so the LLM has real values for both over- and
+        # under-performers. Without the bottom-3, an entity like Region_G
+        # (which actually GREW 30%) wouldn't be in the payload, and the
+        # LLM would invent values for it if it mentioned it.
         for dim, entities in (state.get("dimension_deltas") or {}).items():
-            payload["deltas"][dim] = [
-                {
+            if not entities:
+                continue
+            sorted_ents = sorted(entities, key=lambda d: d["absolute_change"])
+            selected = sorted_ents[:5] + sorted_ents[-3:]
+            seen = set()
+            deduped = []
+            for d in selected:
+                key = d.get("entity")
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append({
                     "entity": d.get("entity"),
                     "baseline_period": d.get("baseline_period"),
                     "target_period": d.get("target_period"),
@@ -112,9 +152,8 @@ class ReportAgent(BaseAgent):
                     "target_value": d.get("target_value"),
                     "absolute_change": d.get("absolute_change"),
                     "change_pct": d.get("change_pct"),
-                }
-                for d in entities[:5]
-            ]
+                })
+            payload["deltas"][dim] = deduped
 
         # 3. Root causes
         for c in (state.get("root_causes") or {}).get("primary_causes", [])[:5]:
@@ -161,6 +200,13 @@ class ReportAgent(BaseAgent):
             for s in KNOWN_SCENARIOS
         ]
 
+        # 5b. Pre-built mandatory disclaimers
+        payload["mandatory_disclaimers"] = [
+            f"{s['entity']} \u2014 {s['description']}. Not detected by current analysis."
+            for s in payload["known_scenarios"]
+            if s["detected"] is False
+        ]
+
         # 6. Known limitations
         payload["known_limitations"] = (
             (state.get("root_causes") or {}).get("known_limitations", [])
@@ -171,11 +217,14 @@ class ReportAgent(BaseAgent):
     # ----------------------------------------------------------
     # Serialization with a size cap that NEVER truncates mid-token.
     # ----------------------------------------------------------
-    def _serialize_payload(self, payload: dict, max_chars: int = 6000) -> str:
+    def _serialize_payload(self, payload: dict, max_chars: int = 8000) -> str:
         s = json.dumps(payload, default=str)
         if len(s) <= max_chars:
             return s
 
+        # Drop optional sections in priority order, keeping the derived
+        # headline fields (aov/txn/cancel change_pct) and deltas since
+        # those are the ones the report needs to cite.
         for field in ("anomalies", "known_limitations", "root_causes"):
             trimmed = dict(payload)
             trimmed.pop(field, None)
@@ -183,19 +232,38 @@ class ReportAgent(BaseAgent):
             if len(s) <= max_chars:
                 return s
 
+        # Last resort: keep only headline + mandatory_disclaimers.
         minimal = {
             "headline": payload.get("headline"),
-            "deltas": payload.get("deltas"),
+            "mandatory_disclaimers": payload.get("mandatory_disclaimers"),
         }
         return json.dumps(minimal, default=str)
 
+    @staticmethod
+    def _format_disclaimers(payload: dict) -> str:
+        bullets = payload.get("mandatory_disclaimers") or []
+        if not bullets:
+            return "(none \u2014 all known scenarios were detected)"
+        return "\n".join(f"- {b}" for b in bullets)
+
     # ----------------------------------------------------------
-    # Step 4.1 — Post-generation traceability check.
+    # Post-generation traceability check.
     # ----------------------------------------------------------
     def _validate_report(self, report: str, payload: dict) -> dict:
         report_nums = self._extract_claim_numbers(report)
         payload_nums = self._extract_payload_numbers(payload)
-        untraceable = report_nums - payload_nums
+        untraceable = {
+            n for n in report_nums
+            if not self._matches_any(n, payload_nums)
+        }
+
+        # Semantic check: any entity named in an Observed Changes bullet
+        # that carries dollar amounts must appear in payload["deltas"].
+        # This catches cases like "Region_G: from $642,603.22 to $499,342.92"
+        # where Region_G isn't in the payload at all and the values are
+        # invented, even if the numbers happen to be fabricated rather
+        # than invented (both are hallucinations).
+        untraceable_entities = self._find_untraceable_entities(report, payload)
 
         missing_disclaimers = []
         report_lower = report.lower()
@@ -217,70 +285,135 @@ class ReportAgent(BaseAgent):
 
         return {
             "untraceable_numbers": sorted(untraceable),
+            "untraceable_entities": sorted(untraceable_entities),
             "missing_scenario_disclaimers": missing_disclaimers,
             "headline_present": headline_present,
             "passed": (
                 not untraceable
+                and not untraceable_entities
                 and not missing_disclaimers
                 and headline_present
             ),
         }
 
+    def _find_untraceable_entities(self, report: str, payload: dict) -> list:
+        """
+        Extract entity names from Observed Changes bullets that carry
+        dollar amounts, and return any that don't appear in payload["deltas"].
+
+        A bullet like:
+            "**Region_G:** from 642,603.22 (2026-07) to 499,342.92 (2026-08), -26.09% change"
+        names Region_G and cites two dollar values. If Region_G isn't in
+        any dimension of payload["deltas"], the values are hallucinated.
+        """
+        if "## Observed Changes" not in report:
+            return []
+        # Isolate the Observed Changes section
+        observed = report.split("## Observed Changes", 1)[1]
+        observed = observed.split("##", 1)[0]
+
+        # Collect every entity name that appears in payload["deltas"]
+        known_entities = set()
+        for dim_entities in payload.get("deltas", {}).values():
+            for e in dim_entities:
+                ent = e.get("entity")
+                if ent:
+                    known_entities.add(str(ent).lower())
+
+        untraceable = []
+        for line in observed.split("\n"):
+            # Only consider bullet lines with a bold entity and a $
+            if "$" not in line and not re.search(r"\d+,\d+\.\d+", line):
+                continue
+            m = re.search(r"\*\*([^*]+)\*\*", line)
+            if not m:
+                continue
+            entity_name = m.group(1).strip().rstrip(":").strip()
+            if not entity_name:
+                continue
+            # Skip bullet headers that aren't entity names (e.g. "Total")
+            if entity_name.lower() in ("total", "overall", "summary"):
+                continue
+            if entity_name.lower() not in known_entities:
+                untraceable.append(entity_name)
+        return untraceable
+
+    # ----------------------------------------------------------
+    # Number extractors — both return ABSOLUTE VALUES.
+    # ----------------------------------------------------------
     @staticmethod
     def _extract_claim_numbers(text: str) -> set:
         """
-        Extract numbers that look like real numerical claims from markdown.
+        Extract numbers from markdown as ABSOLUTE VALUES.
 
-        A claim number is a number with one of:
-          * a decimal point     → 3.5, -30.00, 999,999.99
-          * a percent sign      → 30%   (captured as "30")
-          * a currency prefix   → $70   (captured as "70")
-
-        We ignore bare integers like "1" in "1 analysis" or "2" in
-        "2 dimensions" — they are structural, not claims.
-
-        Thousands separators (,, non-breaking space, thin space, narrow
-        no-break space) are stripped so "$999,999.99" is extracted as
-        "999999.99", not split into "999" and "999.99".
+        Sign is inferred from context words ("dropped", "fell", "up"),
+        so -1.56 in the payload matches 1.56 in the report.
         """
         claims = set()
 
         def _normalize(s: str) -> str:
-            return (
-                s.replace(",", "")
+            s = (s.replace(",", "")
                  .replace("\u00a0", "")
                  .replace("\u2009", "")
-                 .replace("\u202f", "")
-            )
+                 .replace("\u202f", ""))
+            return s.lstrip("+-")
 
-        # Percent claims: 30%, -12.5%, +2.4%  (sign optional, % required)
-        for m in re.finditer(r"([+-]?)\s*\$?\s*([\d,\.]+)\s*%", text):
-            num = _normalize(m.group(2))
-            if num.replace(".", "").isdigit():
-                claims.add(f"{m.group(1)}{num}")
+        # Percent claims
+        for m in re.finditer(r"[+-]?\s*\$?\s*([\d,\.]+)\s*%", text):
+            num = _normalize(m.group(1))
+            if num and num.replace(".", "").isdigit():
+                claims.add(num)
 
-        # Currency claims: $999,999.99, -$70, +$1,000
-        for m in re.finditer(r"([+-]?)\s*\$\s*([\d,\.]+)", text):
-            num = _normalize(m.group(2))
-            if num.replace(".", "").isdigit():
-                claims.add(f"{m.group(1)}{num}")
+        # Currency claims
+        for m in re.finditer(r"[+-]?\s*\$\s*([\d,\.]+)", text):
+            num = _normalize(m.group(1))
+            if num and num.replace(".", "").isdigit():
+                claims.add(num)
 
-        # Bare decimals: 3.5, -30.00, 999,999.99 (must contain a '.')
-        for m in re.finditer(r"([+-]?\d[\d,]*\.\d+)", text):
-            claims.add(_normalize(m.group(1)))
+        # Bare decimals
+        for m in re.finditer(r"[+-]?\d[\d,]*\.\d+", text):
+            claims.add(_normalize(m.group(0)))
 
         return claims
 
     @staticmethod
     def _extract_payload_numbers(payload: dict) -> set:
-        """Extract the same claim-number format from the payload."""
+        """
+        Extract numbers from the payload in the same absolute-value form
+        as _extract_claim_numbers.
+        """
         s = json.dumps(payload, default=str)
         nums = set()
         for m in re.finditer(r"-?\d+\.\d+", s):
-            nums.add(m.group(0))
+            nums.add(m.group(0).lstrip("+-"))
         for m in re.finditer(r":\s*(-?\d+)(?=[,\s}])", s):
-            nums.add(m.group(1))
+            nums.add(m.group(1).lstrip("+-"))
         return nums
+
+    @staticmethod
+    def _matches_any(num_str: str, candidate_set: set, tol: float = 0.05) -> bool:
+        """
+        True if num_str matches any candidate numerically, within tolerance.
+
+        Also tries candidate * 100 and candidate / 100 so that a payload
+        value stored as a decimal (0.036) matches a report value written
+        as a percent (3.60).
+        """
+        try:
+            target = float(num_str)
+        except ValueError:
+            return num_str in candidate_set
+        for c in candidate_set:
+            try:
+                val = float(c)
+            except ValueError:
+                if c == num_str:
+                    return True
+                continue
+            for scaled in (val, val * 100, val / 100):
+                if abs(scaled - target) <= tol:
+                    return True
+        return False
 
     @staticmethod
     def _number_in_report(value, report: str) -> bool:
