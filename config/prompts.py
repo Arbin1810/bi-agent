@@ -273,8 +273,8 @@ omit, do not reorder. If the list says "(none)", do not add any.
 MANDATORY DISCLAIMERS:
 {mandatory_disclaimers}
 
-VERIFIED PAYLOAD (every number you write MUST appear verbatim in this
-JSON — do not invent, round differently, or paraphrase):
+VERIFIED PAYLOAD (this is a JSON object — READ IT and copy VALUES, not
+key names):
 
 {verified_payload}
 
@@ -283,73 +283,74 @@ Analyst confidence: {confidence}
 
 CRITICAL RULES:
 
-1. Every numeric claim in the report MUST be quoted verbatim from the
-   payload. Do NOT perform arithmetic. Do NOT subtract, divide, or
-   compute percentages from payload values. Every percentage you might
-   want is ALREADY in the payload as a `*_change_pct` field. Quote it.
+1. Every numeric claim MUST be a value copied from the JSON above.
+   Never write JSON key names in the report. If a key is
+   `baseline_value` and its value is `1234.56`, write `$1,234.56`, NOT
+   the literal text "baseline_value". Echoing a key name instead of its
+   value is a failure.
 
-2. You MUST use this exact four-section structure, in this order:
+2. Every numeric claim MUST be quoted verbatim from the payload. Do NOT
+   perform arithmetic. Do NOT subtract, divide, or compute percentages.
+   Every percentage is already in the payload as a `*_change_pct` value.
+
+3. You MUST use this exact four-section structure, in this order:
 
    ## Observed Changes
-   Entity-level deltas from payload["deltas"]. One bullet per top-3
-   negative entity per dimension. For each bullet, quote these fields
-   from the entity's OWN entry in payload["deltas"][dimension][i]
-   VERBATIM:
-     - entity name
-     - baseline_period and target_period (month strings)
-     - baseline_value and target_value (dollar amounts FOR THAT ENTITY)
-     - change_pct
-     - absolute_change (dollar amount FOR THAT ENTITY)
+   Pick the top-3 entities from payload["deltas"]["region"] — those are
+   already sorted most-negative first. Each bullet MUST have the form:
 
-   CRITICAL: Do NOT use payload["headline"] values here. The headline
-   baseline_total and target_total belong to the WHOLE DATASET, not to
-   any single entity. If you write Region_G's revenue as the headline
-   total, you are factually wrong. Every dollar amount in an Observed
-   Changes bullet MUST come from payload["deltas"][dimension][i], never
-   from payload["headline"].
+       **<entity name from the JSON>:** revenue went from $<baseline_value
+       with comma separators> in <baseline_period> to $<target_value with
+       comma separators> in <target_period>, a <change_pct>% change.
 
+   Concrete example (DO NOT COPY THESE NUMBERS — use the real ones from
+   the JSON above for the entities you pick):
+
+       **Region_X:** revenue went from $1,234,567.89 in 2026-07 to
+       $987,654.32 in 2026-08, a -20.00% change.
+
+   Every dollar amount you write must be a NUMBER copied from the JSON,
+   not a key name, not a computed value, not the headline total.
    Do NOT cite "contribution" or "contribution_pct" in this section.
-   Those belong to the root-cause primary causes, not to observed deltas.
-
-   Format example: "**Region_G:** from baseline_value (baseline_period)
-   to target_value (target_period), change_pct% change".
 
    ## Measured Drivers
-   The FIRST bullet MUST state the overall revenue change. Quote these
-   four fields from payload["headline"] VERBATIM in one sentence:
-     - total_change_pct
-     - absolute_change
-     - baseline_total
-     - target_total
-   Example format: "Total revenue changed by X% (Y, from A to B)".
-   This sentence must appear BEFORE any per-driver bullets.
+   The FIRST bullet MUST state the overall revenue change. Copy the
+   values for the headline keys into a sentence like:
 
-   Then add these three bullets, quoting payload["headline"] VERBATIM:
-     - aov_change_pct (as "AOV changed by X%")
-     - txn_change_pct (as "Transaction count changed by X%")
-     - cancel_rate_change_pct (as "Cancellation rate changed by X%")
+       Total revenue changed by <total_change_pct>% (<absolute_change>
+       dollars, from $<baseline_total> to $<target_total>).
 
-   If a field is null, state the raw baseline and target values without
-   computing a percent. Finally, state whether volume or price drove the
-   change, based on the relative magnitudes of txn_change_pct vs
-   aov_change_pct.
+   Concrete example (DO NOT COPY THESE NUMBERS):
+
+       Total revenue changed by -1.56% (-15,662.04 dollars, from
+       $1,002,952.23 to $987,290.19).
+
+   Then add three more bullets, one each for the AOV, transaction count,
+   and cancellation rate changes, using the change-pct values from the
+   headline section of the JSON:
+
+       - AOV changed by <aov_change_pct>%
+       - Transaction count changed by <txn_change_pct>%
+       - Cancellation rate changed by <cancel_rate_change_pct>%
+
+   Finally, state whether volume or price drove the change, based on
+   which of txn_change_pct vs aov_change_pct has the larger magnitude.
 
    ## Hypotheses to Investigate
    Copy the MANDATORY DISCLAIMERS bullets above verbatim as your first
    entries in this section. Then you may add any additional hypotheses
-   you can support from the payload. Do NOT include numbers in this
-   section unless they already appear under Observed Changes or
-   Measured Drivers.
+   you can support from the JSON. Do NOT include numbers in this section
+   unless they already appear under Observed Changes or Measured Drivers.
 
    ## Known Limitations
-   Copy payload["known_limitations"] as bullets.
+   Copy the values from the known_limitations array in the JSON as
+   bullets.
 
-3. Do NOT cite raw JSON key names in prose. Write in sentences.
-4. Do NOT add sections beyond the four named above, plus a title and a
-   period line.
-5. If payload["anomalies"] is empty, say so explicitly under Observed
-   Changes, and do NOT claim "no anomalies" — say "no revenue-scope
-   anomalies were flagged" to be honest about the detector's scope.
+4. Do NOT cite JSON key names in prose. Write in sentences. If a
+   sentence would contain the word "baseline_value" or "change_pct" or
+   "absolute_change", you have made an error — replace those with the
+   actual numbers.
+5. Do NOT add sections beyond the four named above, plus a title line.
 
 Format (Markdown):
 
