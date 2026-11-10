@@ -47,22 +47,43 @@ class ReportAgent(BaseAgent):
         self.log("Writing report")
 
         payload = self._build_verified_payload(state)
+
+        # R5: confidence derived from validation + detection, not from critic.
+        confidence_pre = self._compute_confidence(state, payload)
+
         prompt = REPORT_PROMPT.format(
             question=state["question"],
             verified_payload=self._serialize_payload(payload),
             mandatory_disclaimers=self._format_disclaimers(payload),
             charts=[c["path"] for c in state.get("charts", [])],
-            confidence=state.get("critique", {}).get("confidence", "medium"),
+            confidence=confidence_pre,
         )
 
         report = self.llm.complete(prompt, temperature=0.3)
 
-        deterministic_observed = self._rebuild_observed_changes(payload)
+        # R9: deterministic rewrites of three sections (LLM cannot fabricate)
         report = self._replace_section(
-            report, "## Observed Changes", deterministic_observed
+            report, "## Observed Changes", self._rebuild_observed_changes(payload)
+        )
+        report = self._replace_section(
+            report, "## Detection Summary", self._rebuild_detection_summary(payload)
+        )
+        report = self._replace_section(
+            report, "## Known Limitations", self._rebuild_known_limitations(payload)
         )
 
+        # R5: derive confidence from the actual report+state and force
+        # the title to say the right thing (even if the LLM wrote a
+        # different value).
         validation = self._validate_report(report, payload)
+        confidence = self._compute_confidence(state, payload, validation=validation)
+        report = re.sub(
+            r"# Revenue Analysis\s+[—-]\s+\w+\s+confidence",
+            f"# Revenue Analysis \u2014 {confidence} confidence",
+            report,
+            count=1,
+        )
+
         if validation["placeholder_echoes"]:
             self.log(f"WARNING: report echoes placeholder keys: {validation['placeholder_echoes']}")
         if validation["untraceable_numbers"]:
@@ -72,7 +93,7 @@ class ReportAgent(BaseAgent):
         if validation["missing_scenario_disclaimers"]:
             self.log(f"WARNING: report omits undetected scenarios: {validation['missing_scenario_disclaimers']}")
         if validation["passed"]:
-            self.log("Report traceability: PASSED")
+            self.log(f"Report traceability: PASSED (confidence: {confidence})")
 
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         out = settings.reports_dir / f"report_{ts}.md"
@@ -82,7 +103,28 @@ class ReportAgent(BaseAgent):
         state["report_path"] = str(out)
         state["report_validation"] = validation
         state["verified_payload"] = payload
+        state["report_confidence"] = confidence
         return state
+
+    def _compute_confidence(self, state: dict, payload: dict, validation: dict | None = None) -> str:
+        if validation is None:
+            validation = state.get("report_validation") or {}
+
+        scenarios = payload.get("known_scenarios", [])
+        n_total = len(scenarios)
+        n_detected = sum(1 for s in scenarios if s.get("detected"))
+        validation_passed = bool(validation.get("passed", False))
+
+        if n_total == 0:
+            return "high" if validation_passed else "low"
+
+        if not validation_passed:
+            return "low"
+        if n_detected == n_total:
+            return "high"
+        if n_detected == 0:
+            return "low"
+        return "medium"
 
     def _rebuild_observed_changes(self, payload: dict) -> str:
         lines = ["## Observed Changes"]
@@ -107,6 +149,51 @@ class ReportAgent(BaseAgent):
 
         if not any_emitted:
             lines.append("- No entity-level deltas were computed.")
+        return "\n".join(lines)
+
+    def _rebuild_detection_summary(self, payload: dict) -> str:
+        lines = ["## Detection Summary"]
+        scenarios = payload.get("known_scenarios", [])
+        if not scenarios:
+            lines.append("- No scenarios evaluated.")
+            return "\n".join(lines)
+
+        for s in scenarios:
+            detected = s.get("detected")
+            marker = "\u2713" if detected else "\u2717"
+            sid = s.get("id", "?")
+            entity = s.get("entity", "?")
+            description = s.get("description", "")
+            metric = s.get("metric")
+            baseline = s.get("baseline_value")
+            target = s.get("target_value")
+            evidence = s.get("evidence")
+
+            if evidence:
+                detail = evidence
+            elif metric and baseline is not None and target is not None:
+                detail = f"{metric}: {baseline} \u2192 {target}"
+            else:
+                detail = description
+
+            lines.append(f"- {marker} **{sid}** ({entity}) \u2014 {detail}")
+
+        return "\n".join(lines)
+
+    def _rebuild_known_limitations(self, payload: dict) -> str:
+        lines = ["## Known Limitations"]
+        limitations = payload.get("known_limitations") or []
+        disclaimers = payload.get("mandatory_disclaimers") or []
+
+        if not limitations and not disclaimers:
+            lines.append("- No limitations recorded.")
+            return "\n".join(lines)
+
+        for lim in limitations:
+            lines.append(f"- {lim}")
+        for disc in disclaimers:
+            lines.append(f"- {disc}")
+
         return "\n".join(lines)
 
     @staticmethod
@@ -140,7 +227,6 @@ class ReportAgent(BaseAgent):
             "gross_negative": None,
             "positive_offset": None,
             "net_revenue_change": None,
-            "confidence": state.get("critique", {}).get("confidence", "medium"),
         }
 
         os_ = (state.get("analysis") or {}).get("overall_summary") or {}
@@ -366,14 +452,23 @@ class ReportAgent(BaseAgent):
                 untraceable.append(entity_name)
         return untraceable
 
+    # ------------------------------------------------------------------
+    # DELIVERY 4 FIX — extractors (strip trailing punctuation, comma-
+    # normalize payload, extract percent-form from payload strings)
+    # ------------------------------------------------------------------
     @staticmethod
     def _extract_claim_numbers(text: str) -> set:
         claims = set()
+
         def _normalize(s: str) -> str:
             s = (s.replace(",", "")
                  .replace("\u00a0", "")
                  .replace("\u2009", "")
                  .replace("\u202f", ""))
+            # Strip trailing sentence punctuation the regex may have
+            # captured (e.g. "198990.93." → "198990.93"). Does NOT strip
+            # the decimal point inside the number.
+            s = s.rstrip(".;:!?,)]}\u00a0 \t")
             return s.lstrip("+-")
 
         for m in re.finditer(r"[+-]?\s*\$?\s*([\d,\.]+)\s*%", text):
@@ -391,10 +486,18 @@ class ReportAgent(BaseAgent):
     @staticmethod
     def _extract_payload_numbers(payload: dict) -> set:
         s = json.dumps(payload, default=str)
+        # Strip commas that separate thousands so "347,241.06" is one
+        # token. Pattern requires a digit on both sides, so JSON
+        # structural commas are untouched.
+        s = re.sub(r"(?<=\d),(?=\d)", "", s)
+
         nums = set()
         for m in re.finditer(r"-?\d+\.\d+", s):
             nums.add(m.group(0).lstrip("+-"))
         for m in re.finditer(r":\s*(-?\d+)(?=[,\s}])", s):
+            nums.add(m.group(1).lstrip("+-"))
+        # Percent-form numbers inside strings (e.g. "threshold -25%")
+        for m in re.finditer(r"([+-]?\d+(?:\.\d+)?)\s*%", s):
             nums.add(m.group(1).lstrip("+-"))
         return nums
 

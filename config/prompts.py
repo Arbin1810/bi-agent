@@ -256,9 +256,12 @@ Return JSON:
   "is_complete": true/false,
   "gaps": [...],
   "weak_evidence": [...],
-  "additional_analysis_needed": [...],
-  "confidence": "high/medium/low"
+  "additional_analysis_needed": [...]
 }}
+
+Do NOT include a "confidence" field. Confidence is computed by the
+report pipeline from validation results and detection completeness,
+not from your judgment.
 """
 
 REPORT_PROMPT = """You are a management report writer. Produce a concise executive report.
@@ -292,24 +295,12 @@ CRITICAL RULES:
 2. Every numeric claim MUST be quoted verbatim from the payload. Do NOT
    perform arithmetic. Do NOT subtract, divide, or compute percentages.
 
-3. You MUST use this exact five-section structure, in this order:
+3. You MUST use this exact six-section structure, in this order:
 
    ## Observed Changes
-   Pick the top-3 entities from payload["deltas"]["region"] — those are
-   already sorted most-negative first. Each bullet MUST have the form:
-
-       **<entity name from the JSON>:** revenue went from $<baseline_value
-       with comma separators> in <baseline_period> to $<target_value with
-       comma separators> in <target_period>, a <change_pct>% change.
-
-   Concrete example (DO NOT COPY THESE NUMBERS):
-
-       **Region_X:** revenue went from $1,234,567.89 in 2026-07 to
-       $987,654.32 in 2026-08, a -20.00% change.
-
-   Every dollar amount you write must be a NUMBER copied from the JSON,
-   not a key name, not a computed value, not the headline total.
-   Do NOT cite "contribution" or "contribution_pct" in this section.
+   [This section will be REPLACED by the report pipeline. Write a
+   placeholder — the actual content is generated deterministically
+   from payload["deltas"].]
 
    ## Measured Drivers
    The FIRST sentence MUST state the KPI definition and the headline
@@ -347,30 +338,33 @@ CRITICAL RULES:
 
    Then paste payload["headline"]["driver_decomposition"]["narrative"]
    verbatim as a concluding sentence. Do NOT reword the narrative. Do
-   NOT substitute your own interpretation. If the narrative says
-   "price was the primary driver; volume partially offset the change",
-   write exactly that.
+   NOT substitute your own interpretation.
 
-   The volume + price + interaction terms sum EXACTLY to the total
-   change. If you write any of these numbers differently from the JSON,
-   you are wrong.
+   ## Detection Summary
+   [This section will be REPLACED by the report pipeline. Write a
+   placeholder — the actual content is generated deterministically from
+   payload["known_scenarios"], showing each scenario's metric,
+   baseline, target, and detection status.]
 
    ## Hypotheses to Investigate
    Copy the MANDATORY DISCLAIMERS bullets above verbatim as your first
-   entries in this section. Then you may add any additional hypotheses
-   you can support from the JSON. Do NOT include numbers in this section
-   unless they already appear under Observed Changes, Measured Drivers,
-   or Driver Decomposition.
+   entries in this section (if the list says "(none)", skip). Then you
+   may add any additional hypotheses you can support from the JSON. Do
+   NOT include numbers in this section unless they already appear under
+   Measured Drivers or Driver Decomposition.
 
    ## Known Limitations
-   Copy the values from the known_limitations array in the JSON as
-   bullets.
+   [This section will be REPLACED by the report pipeline. Write a
+   placeholder — the actual content is generated deterministically from
+   payload["known_limitations"] and payload["mandatory_disclaimers"].]
 
-4. Do NOT cite JSON key names in prose. Write in sentences. If a
-   sentence would contain the word "baseline_value" or "change_pct" or
-   "absolute_change", you have made an error — replace those with the
-   actual numbers.
-5. Do NOT add sections beyond the five named above, plus a title line.
+4. Do NOT cite JSON key names in prose. Write in sentences.
+
+5. Do NOT determine the confidence level yourself. The title line
+   `# Revenue Analysis — confidence` will be rewritten by the report
+   pipeline based on validation results and detection completeness.
+
+6. Do NOT add sections beyond the six named above, plus a title line.
 
 Format (Markdown):
 
@@ -383,6 +377,9 @@ Format (Markdown):
 - ...
 
 ## Driver Decomposition
+- ...
+
+## Detection Summary
 - ...
 
 ## Hypotheses to Investigate

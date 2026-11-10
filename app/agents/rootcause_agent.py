@@ -16,8 +16,6 @@ class RootCauseAgent(BaseAgent):
                 headline = r
                 break
 
-        # Revenue deltas only — root cause is about revenue contribution.
-        # metric_deltas["revenue"] is aliased as state["dimension_deltas"].
         deltas = state.get("dimension_deltas") or {}
 
         prompt = ROOT_CAUSE_PROMPT.format(
@@ -28,17 +26,10 @@ class RootCauseAgent(BaseAgent):
         )
         rc = self.llm.complete_json(prompt)
 
-        # ----------------------------------------------------------
-        # OVERRIDE: rebuild primary_causes from deltas with COMPLETE
-        # denominators. The delta table is now sliced to [:30] per
-        # dimension (was [:10]), so all meaningful entities are present.
-        # ----------------------------------------------------------
         flat = []
         for dim, entities in deltas.items():
-                flat.extend(entities)
+            flat.extend(entities)
 
-        # Per-dimension totals: negative (declines), positive (growth).
-        # These are the honest denominators for contribution_pct.
         dim_stats = {}
         for dim, entities in deltas.items():
             total_neg = sum(-d["absolute_change"] for d in entities if d["absolute_change"] < 0)
@@ -49,7 +40,6 @@ class RootCauseAgent(BaseAgent):
                 "net": round(total_pos - total_neg, 2),
             }
 
-        # Aggregate across dimensions for the top-level summary.
         gross_negative = sum(s["total_negative"] for s in dim_stats.values())
         positive_offset = sum(s["total_positive"] for s in dim_stats.values())
 
@@ -86,13 +76,11 @@ class RootCauseAgent(BaseAgent):
             rc["primary_causes"] = primary
             self.log(f"Root-cause override: {len(primary)} causes from deltas")
 
-        # Dimension-level statistics for the report
         rc["dimension_totals"] = dim_stats
         rc["gross_negative"] = round(gross_negative, 2)
         rc["positive_offset"] = round(positive_offset, 2)
         rc["net_revenue_change"] = round(positive_offset - gross_negative, 2)
 
-        # Limitations
         rc["known_limitations"] = rc.get("known_limitations") or []
         cross_dim_note = (
             "contribution_pct is measured within each dimension, not across "
@@ -112,13 +100,20 @@ class RootCauseAgent(BaseAgent):
         if revenue_only_note not in rc["known_limitations"]:
             rc["known_limitations"].append(revenue_only_note)
 
-        # New: gross vs net honesty
+        # DELIVERY 4 FIX — plain numbers, no $, no thousands separator, so
+        # the report validator's payload extractor can trace every value
+        # this string renders into the report. The previous version used
+        # ${value:,.2f}, whose "$347,241.06." form failed punctuation and
+        # comma normalization on the extractor side.
         gross_net_note = (
             f"Total gross negative change across dimensions: "
-            f"${gross_negative:,.2f}. Positive offsets (entities that grew): "
-            f"${positive_offset:,.2f}. Net revenue change: "
-            f"${rc['net_revenue_change']:,.2f}. Contribution percentages "
-            f"are of gross negative change, not of the net decline."
+            f"{gross_negative:.2f} dollars. "
+            f"Positive offsets (entities that grew): "
+            f"{positive_offset:.2f} dollars. "
+            f"Net revenue change: "
+            f"{rc['net_revenue_change']:.2f} dollars. "
+            f"Contribution percentages are of gross negative change, not "
+            f"of the net decline."
         )
         if gross_net_note not in rc["known_limitations"]:
             rc["known_limitations"].append(gross_net_note)
