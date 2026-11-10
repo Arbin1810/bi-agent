@@ -26,6 +26,8 @@ PLACEHOLDER_KEYS = [
     "baseline_aov", "target_aov",
     "baseline_txn_count", "target_txn_count",
     "baseline_cancel_rate", "target_cancel_rate",
+    "revenue_definition", "driver_decomposition",
+    "volume_effect", "price_effect", "interaction_effect",
 ]
 
 
@@ -55,7 +57,6 @@ class ReportAgent(BaseAgent):
 
         report = self.llm.complete(prompt, temperature=0.3)
 
-        # Deterministic rewrite of Observed Changes
         deterministic_observed = self._rebuild_observed_changes(payload)
         report = self._replace_section(
             report, "## Observed Changes", deterministic_observed
@@ -83,7 +84,6 @@ class ReportAgent(BaseAgent):
         state["verified_payload"] = payload
         return state
 
-    # ------------------------------------------------------------------
     def _rebuild_observed_changes(self, payload: dict) -> str:
         lines = ["## Observed Changes"]
         any_emitted = False
@@ -128,7 +128,6 @@ class ReportAgent(BaseAgent):
             result += "\n\n" + after
         return result
 
-    # ------------------------------------------------------------------
     def _build_verified_payload(self, state: dict) -> dict:
         payload = {
             "headline": None,
@@ -147,12 +146,15 @@ class ReportAgent(BaseAgent):
         os_ = (state.get("analysis") or {}).get("overall_summary") or {}
         if os_:
             payload["headline"] = {
+                "revenue_definition": os_.get("revenue_definition"),
                 "baseline_period": os_.get("baseline_period"),
                 "target_period": os_.get("target_period"),
                 "baseline_total": os_.get("baseline_total"),
                 "target_total": os_.get("target_total"),
                 "absolute_change": os_.get("absolute_change"),
                 "total_change_pct": os_.get("total_change_pct"),
+                "gross_baseline_total": os_.get("gross_baseline_total"),
+                "gross_target_total": os_.get("gross_target_total"),
                 "baseline_aov": os_.get("baseline_aov"),
                 "target_aov": os_.get("target_aov"),
                 "aov_change_pct": _pct_change(os_.get("baseline_aov"), os_.get("target_aov")),
@@ -162,6 +164,7 @@ class ReportAgent(BaseAgent):
                 "baseline_cancel_rate": os_.get("baseline_cancel_rate"),
                 "target_cancel_rate": os_.get("target_cancel_rate"),
                 "cancel_rate_change_pct": _pct_change(os_.get("baseline_cancel_rate"), os_.get("target_cancel_rate")),
+                "driver_decomposition": os_.get("driver_decomposition"),
             }
 
         for dim, entities in (state.get("dimension_deltas") or {}).items():
@@ -213,12 +216,9 @@ class ReportAgent(BaseAgent):
             if a.get("severity") in ("high", "medium")
         ]
 
-        # Scenario detection — prefer state["scenario_detection"] (new
-        # metric-specific truth); fall back to legacy known_scenario_check.
         scenario_detection = state.get("scenario_detection") or []
         detection_by_id = {d["id"]: d for d in scenario_detection}
 
-        # Legacy path — for state produced before this delivery, or tests.
         if not detection_by_id:
             computed = (state.get("anomalies") or {}).get("computed_statistics") or {}
             legacy = {

@@ -291,9 +291,8 @@ CRITICAL RULES:
 
 2. Every numeric claim MUST be quoted verbatim from the payload. Do NOT
    perform arithmetic. Do NOT subtract, divide, or compute percentages.
-   Every percentage is already in the payload as a `*_change_pct` value.
 
-3. You MUST use this exact four-section structure, in this order:
+3. You MUST use this exact five-section structure, in this order:
 
    ## Observed Changes
    Pick the top-3 entities from payload["deltas"]["region"] — those are
@@ -303,8 +302,7 @@ CRITICAL RULES:
        with comma separators> in <baseline_period> to $<target_value with
        comma separators> in <target_period>, a <change_pct>% change.
 
-   Concrete example (DO NOT COPY THESE NUMBERS — use the real ones from
-   the JSON above for the entities you pick):
+   Concrete example (DO NOT COPY THESE NUMBERS):
 
        **Region_X:** revenue went from $1,234,567.89 in 2026-07 to
        $987,654.32 in 2026-08, a -20.00% change.
@@ -314,16 +312,18 @@ CRITICAL RULES:
    Do NOT cite "contribution" or "contribution_pct" in this section.
 
    ## Measured Drivers
-   The FIRST bullet MUST state the overall revenue change. Copy the
-   values for the headline keys into a sentence like:
+   The FIRST sentence MUST state the KPI definition and the headline
+   change together. Copy the values for the headline keys into a
+   sentence like:
 
-       Total revenue changed by <total_change_pct>% (<absolute_change>
-       dollars, from $<baseline_total> to $<target_total>).
+       Revenue (<revenue_definition>) changed by <total_change_pct>%
+       (<absolute_change> dollars, from $<baseline_total> to
+       $<target_total>).
 
    Concrete example (DO NOT COPY THESE NUMBERS):
 
-       Total revenue changed by -1.56% (-15,662.04 dollars, from
-       $1,002,952.23 to $987,290.19).
+       Revenue (completed_revenue) changed by -3.77% (-37,844.22 dollars,
+       from $1,002,952.23 to $965,108.01).
 
    Then add three more bullets, one each for the AOV, transaction count,
    and cancellation rate changes, using the change-pct values from the
@@ -333,14 +333,34 @@ CRITICAL RULES:
        - Transaction count changed by <txn_change_pct>%
        - Cancellation rate changed by <cancel_rate_change_pct>%
 
-   Finally, state whether volume or price drove the change, based on
-   which of txn_change_pct vs aov_change_pct has the larger magnitude.
+   Do NOT state which of these "drove the change" or "had the larger
+   magnitude". That conclusion belongs in the Driver Decomposition
+   section, where it is computed deterministically.
+
+   ## Driver Decomposition
+   Copy payload["headline"]["driver_decomposition"] verbatim. State all
+   THREE effects in the report as three bullets:
+
+       - Volume effect: $<volume_effect> (<volume_effect_pct_of_total>% of total change)
+       - Price effect: $<price_effect> (<price_effect_pct_of_total>% of total change)
+       - Interaction effect: $<interaction_effect> (<interaction_effect_pct_of_total>% of total change)
+
+   Then paste payload["headline"]["driver_decomposition"]["narrative"]
+   verbatim as a concluding sentence. Do NOT reword the narrative. Do
+   NOT substitute your own interpretation. If the narrative says
+   "price was the primary driver; volume partially offset the change",
+   write exactly that.
+
+   The volume + price + interaction terms sum EXACTLY to the total
+   change. If you write any of these numbers differently from the JSON,
+   you are wrong.
 
    ## Hypotheses to Investigate
    Copy the MANDATORY DISCLAIMERS bullets above verbatim as your first
    entries in this section. Then you may add any additional hypotheses
    you can support from the JSON. Do NOT include numbers in this section
-   unless they already appear under Observed Changes or Measured Drivers.
+   unless they already appear under Observed Changes, Measured Drivers,
+   or Driver Decomposition.
 
    ## Known Limitations
    Copy the values from the known_limitations array in the JSON as
@@ -350,7 +370,7 @@ CRITICAL RULES:
    sentence would contain the word "baseline_value" or "change_pct" or
    "absolute_change", you have made an error — replace those with the
    actual numbers.
-5. Do NOT add sections beyond the four named above, plus a title line.
+5. Do NOT add sections beyond the five named above, plus a title line.
 
 Format (Markdown):
 
@@ -360,6 +380,9 @@ Format (Markdown):
 - ...
 
 ## Measured Drivers
+- ...
+
+## Driver Decomposition
 - ...
 
 ## Hypotheses to Investigate

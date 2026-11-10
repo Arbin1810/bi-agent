@@ -10,10 +10,6 @@ from config.prompts import SQL_GENERATION_PROMPT
 class SQLAgent(BaseAgent):
     name = "SQLAgent"
 
-    # Dimensions we compute per-metric deltas for. Matches the six
-    # decomposition dimensions the SQL_GENERATION_PROMPT asks the LLM to
-    # produce, minus order_status (which only has cancel_rate as a
-    # meaningful metric).
     METRIC_DIMENSIONS: ClassVar[list[str]] = [
         "region", "product_id", "branch", "customer_segment"
     ]
@@ -68,16 +64,14 @@ class SQLAgent(BaseAgent):
                     "columns": list(df.columns),
                 })
                 self.log(f"✓ {q.get('purpose','query')}: {len(df)} rows")
-            except Exception as e:  # noqa: BLE001 — individual query failure; log and continue
+            except Exception as e:  # noqa: BLE001
                 self.log(f"✗ Query failed ({q.get('purpose')}): {e}")
 
-        # HEADLINE anchor
         headline = self._build_headline(state, executor)
         if headline is not None:
             results.insert(0, headline)
             self.log("✓ HEADLINE: canonical comparison totals computed")
 
-        # METRIC DELTAS — all four metrics × four dimensions
         metric_deltas = self._build_all_metric_deltas(state, executor)
         if metric_deltas:
             total = sum(
@@ -94,16 +88,11 @@ class SQLAgent(BaseAgent):
         state["sql"] = queries[0].get("sql") if queries else None
         state["sql_results"] = results
         state["metric_deltas"] = metric_deltas
-        # Backward-compatible alias — downstream agents that only need
-        # revenue deltas read this.
         state["dimension_deltas"] = metric_deltas.get("revenue", {})
         state["sql_explanation"] = gen.get("explanation", "")
         self.log(f"Executed {len(results)}/{len(queries)} queries")
         return state
 
-    # ------------------------------------------------------------------
-    # HEADLINE: canonical four-metric totals for baseline vs target month
-    # ------------------------------------------------------------------
     def _build_headline(self, state: dict, executor) -> dict | None:
         intent = state.get("intent") or {}
         time_ref = (intent.get("time_reference") or "").strip()
@@ -121,11 +110,17 @@ class SQLAgent(BaseAgent):
         t_str = f"{y:04d}-{m:02d}"
         b_str = f"{base[0]:04d}-{base[1]:02d}"
 
+        # Delivery 3 (R6): expose completed-order revenue alongside gross
+        # revenue. AnalysisAgent picks which KPI to report based on intent.
+        # `total_rev` (gross) is unchanged so existing consumers keep working.
         sql = f"""
         SELECT strftime('%Y-%m', date) AS month,
                COUNT(*) AS txn_count,
                SUM(revenue) AS total_rev,
                AVG(revenue) AS aov,
+               SUM(CASE WHEN order_status = 'Completed' THEN revenue ELSE 0 END) AS completed_rev,
+               SUM(CASE WHEN order_status = 'Completed' THEN 1 ELSE 0 END) AS completed_txn_count,
+               AVG(CASE WHEN order_status = 'Completed' THEN revenue END) AS completed_aov,
                SUM(cost) AS total_cost,
                SUM(cost) * 1.0 / NULLIF(SUM(revenue), 0) AS cost_ratio,
                SUM(CASE WHEN order_status = 'Cancelled' THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS cancel_rate,
@@ -147,42 +142,11 @@ class SQLAgent(BaseAgent):
                 "rows": df.to_dict(orient="records"),
                 "columns": list(df.columns),
             }
-        except Exception as e:  # noqa: BLE001 — headline query best-effort; caller handles None
+        except Exception as e:  # noqa: BLE001
             self.log(f"Headline query failed: {e}")
             return None
 
-    # ------------------------------------------------------------------
-    # METRIC DELTAS: per-metric, per-dimension MoM deltas
-    # ------------------------------------------------------------------
     def _build_all_metric_deltas(self, state: dict, executor) -> dict:
-        """
-        For each (dimension, metric), compute per-entity MoM deltas.
-
-        Returns:
-            {
-              "revenue":    {"region": [entity_deltas...], "product_id": [...], ...},
-              "cost_ratio": {...},
-              "cancel_rate": {...},
-              "quantity":   {...}
-            }
-
-        Selection: per (metric, dimension) we keep the 30 entities that
-        moved the most in EITHER direction, by absolute magnitude of
-        absolute_change. Then we re-sort the kept entities by SIGNED
-        absolute_change ascending (most negative first) so downstream
-        consumers see the established convention.
-
-        Why absolute-magnitude selection: the previous version sorted by
-        signed absolute_change ascending and took [:30], which kept only
-        the 30 most-NEGATIVE entities. P007's cost_ratio anomaly is +17pp
-        (a positive outlier), so it was truncated out of the 50-product
-        dimension and A2 never detected. Selecting by magnitude keeps
-        both tails.
-
-        Ratio metrics store baseline_value / target_value as ratios
-        (0.75, 0.92) but absolute_change in percentage points
-        (+17.00), which matches what the report cites.
-        """
         intent = state.get("intent") or {}
         time_ref = (intent.get("time_reference") or "").strip()
         target = self._parse_month(time_ref)
@@ -218,7 +182,7 @@ class SQLAgent(BaseAgent):
 
             try:
                 df = executor.execute(sql)
-            except Exception as e:  # noqa: BLE001 — per-dimension query failure; log and continue
+            except Exception as e:  # noqa: BLE001
                 self.log(f"✗ Metric delta query failed for {dim}: {e}")
                 continue
 
@@ -284,11 +248,6 @@ class SQLAgent(BaseAgent):
                         "change_pct": pct,
                     })
 
-        # FIX (Delivery 2): select entities by ABSOLUTE MAGNITUDE so
-        # positive outliers like P007's cost_ratio (+17pp) survive, then
-        # re-sort the kept entities by signed absolute_change ascending
-        # so the convention downstream consumers expect (most-negative
-        # first) is preserved.
         for per_dim in metric_deltas.values():
             for dim, table in per_dim.items():
                 table.sort(key=lambda d: abs(d["absolute_change"]), reverse=True)
