@@ -61,9 +61,17 @@ class ReportAgent(BaseAgent):
 
         report = self.llm.complete(prompt, temperature=0.3)
 
-        # R9: deterministic rewrites of three sections (LLM cannot fabricate)
+        # Deterministic rewrites of five sections (LLM cannot fabricate).
+        # Only ## Hypotheses to Investigate remains LLM-authored.
         report = self._replace_section(
             report, "## Observed Changes", self._rebuild_observed_changes(payload)
+        )
+        report = self._replace_section(
+            report, "## Measured Drivers", self._rebuild_measured_drivers(payload)
+        )
+        report = self._replace_section(
+            report, "## Driver Decomposition",
+            self._rebuild_driver_decomposition(payload)
         )
         report = self._replace_section(
             report, "## Detection Summary", self._rebuild_detection_summary(payload)
@@ -126,6 +134,11 @@ class ReportAgent(BaseAgent):
             return "low"
         return "medium"
 
+    # ------------------------------------------------------------------
+    # Deterministic section rebuilds — every numeric section except
+    # Hypotheses to Investigate is rendered from the payload. Only the
+    # Hypotheses section remains LLM-authored, and it is optional.
+    # ------------------------------------------------------------------
     def _rebuild_observed_changes(self, payload: dict) -> str:
         lines = ["## Observed Changes"]
         any_emitted = False
@@ -149,6 +162,76 @@ class ReportAgent(BaseAgent):
 
         if not any_emitted:
             lines.append("- No entity-level deltas were computed.")
+        return "\n".join(lines)
+
+    def _rebuild_measured_drivers(self, payload: dict) -> str:
+        """
+        Deterministic Measured Drivers section, rendered from
+        payload["headline"]. Replaces whatever the LLM wrote.
+        """
+        lines = ["## Measured Drivers"]
+        h = payload.get("headline") or {}
+        if not h:
+            lines.append("- No headline metrics available.")
+            return "\n".join(lines)
+
+        kpi = h.get("revenue_definition") or "revenue"
+        bp = h.get("baseline_period", "?")
+        tp = h.get("target_period", "?")
+        bt = h.get("baseline_total")
+        tt = h.get("target_total")
+        ac = h.get("absolute_change")
+        pct = h.get("total_change_pct")
+
+        if bt is not None and tt is not None and ac is not None and pct is not None:
+            lines.append(
+                f"- Revenue ({kpi}) changed by {pct:+.2f}% "
+                f"({ac:+,.2f} dollars, from ${bt:,.2f} to ${tt:,.2f})."
+            )
+        else:
+            lines.append(f"- Revenue ({kpi}) headline metrics unavailable.")
+
+        aov_pct = h.get("aov_change_pct")
+        if aov_pct is not None:
+            lines.append(f"- AOV changed by {aov_pct:+.2f}%")
+
+        txn_pct = h.get("txn_change_pct")
+        if txn_pct is not None:
+            lines.append(f"- Transaction count changed by {txn_pct:+.2f}%")
+
+        cancel_pct = h.get("cancel_rate_change_pct")
+        if cancel_pct is not None:
+            lines.append(f"- Cancellation rate changed by {cancel_pct:+.2f}%")
+
+        return "\n".join(lines)
+
+    def _rebuild_driver_decomposition(self, payload: dict) -> str:
+        """
+        Deterministic Driver Decomposition section, rendered from
+        payload["headline"]["driver_decomposition"]. Replaces whatever
+        the LLM wrote.
+        """
+        lines = ["## Driver Decomposition"]
+        dd = (payload.get("headline") or {}).get("driver_decomposition")
+        if not dd:
+            lines.append("- Driver decomposition not available.")
+            return "\n".join(lines)
+
+        def _fmt(effect, pct):
+            if effect is None:
+                return "n/a"
+            if pct is None:
+                return f"${effect:+,.2f}"
+            return f"${effect:+,.2f} ({pct:+.2f}% of total change)"
+
+        lines.append(f"- Volume effect: {_fmt(dd.get('volume_effect'), dd.get('volume_effect_pct_of_total'))}")
+        lines.append(f"- Price effect: {_fmt(dd.get('price_effect'), dd.get('price_effect_pct_of_total'))}")
+        lines.append(f"- Interaction effect: {_fmt(dd.get('interaction_effect'), dd.get('interaction_effect_pct_of_total'))}")
+
+        narrative = dd.get("narrative")
+        if narrative:
+            lines.append(f"- {narrative}")
+
         return "\n".join(lines)
 
     def _rebuild_detection_summary(self, payload: dict) -> str:
@@ -452,10 +535,6 @@ class ReportAgent(BaseAgent):
                 untraceable.append(entity_name)
         return untraceable
 
-    # ------------------------------------------------------------------
-    # DELIVERY 4 FIX — extractors (strip trailing punctuation, comma-
-    # normalize payload, extract percent-form from payload strings)
-    # ------------------------------------------------------------------
     @staticmethod
     def _extract_claim_numbers(text: str) -> set:
         claims = set()
@@ -465,9 +544,6 @@ class ReportAgent(BaseAgent):
                  .replace("\u00a0", "")
                  .replace("\u2009", "")
                  .replace("\u202f", ""))
-            # Strip trailing sentence punctuation the regex may have
-            # captured (e.g. "198990.93." → "198990.93"). Does NOT strip
-            # the decimal point inside the number.
             s = s.rstrip(".;:!?,)]}\u00a0 \t")
             return s.lstrip("+-")
 
@@ -486,9 +562,9 @@ class ReportAgent(BaseAgent):
     @staticmethod
     def _extract_payload_numbers(payload: dict) -> set:
         s = json.dumps(payload, default=str)
-        # Strip commas that separate thousands so "347,241.06" is one
-        # token. Pattern requires a digit on both sides, so JSON
-        # structural commas are untouched.
+        # Normalize comma-separated numbers so "347,241.06" becomes
+        # "347241.06" before regex extraction. Only matches commas
+        # between two digits, so JSON structural commas are untouched.
         s = re.sub(r"(?<=\d),(?=\d)", "", s)
 
         nums = set()
@@ -496,7 +572,6 @@ class ReportAgent(BaseAgent):
             nums.add(m.group(0).lstrip("+-"))
         for m in re.finditer(r":\s*(-?\d+)(?=[,\s}])", s):
             nums.add(m.group(1).lstrip("+-"))
-        # Percent-form numbers inside strings (e.g. "threshold -25%")
         for m in re.finditer(r"([+-]?\d+(?:\.\d+)?)\s*%", s):
             nums.add(m.group(1).lstrip("+-"))
         return nums
