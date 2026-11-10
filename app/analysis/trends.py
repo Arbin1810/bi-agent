@@ -1,5 +1,6 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+
 
 def compute_trend(df: pd.DataFrame, date_col: str, value_col: str) -> dict:
     """Compute trend metrics for a time series."""

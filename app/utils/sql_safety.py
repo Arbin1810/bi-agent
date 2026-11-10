@@ -66,7 +66,4 @@ def is_safe_sql(sql: str) -> bool:
         return False
 
     # 4. No forbidden tokens anywhere in the stripped form.
-    if FORBIDDEN.search(stripped):
-        return False
-
-    return True
+    return not FORBIDDEN.search(stripped)

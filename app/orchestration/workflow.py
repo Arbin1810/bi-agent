@@ -1,14 +1,14 @@
-from app.orchestration.state import WorkflowState
-from app.agents.intent_agent import IntentAgent
-from app.agents.planner_agent import PlannerAgent
-from app.agents.sql_agent import SQLAgent
 from app.agents.analysis_agent import AnalysisAgent
 from app.agents.anomaly_agent import AnomalyAgent
-from app.agents.rootcause_agent import RootCauseAgent
-from app.agents.critic_agent import CriticAgent
 from app.agents.chart_agent import ChartAgent
+from app.agents.critic_agent import CriticAgent
+from app.agents.intent_agent import IntentAgent
+from app.agents.planner_agent import PlannerAgent
 from app.agents.report_agent import ReportAgent
+from app.agents.rootcause_agent import RootCauseAgent
+from app.agents.sql_agent import SQLAgent
 from app.data.connectors import db
+from app.orchestration.state import WorkflowState
 from app.utils.logger import logger
 
 MAX_ITERATIONS = 2
@@ -76,7 +76,7 @@ class BIWorkflow:
             state = self.report.run(state)
             state["trace"].append("report")
 
-        except Exception as e:
+        except Exception as e:    # noqa: BLE001 — workflow boundary; log and surface error
             logger.exception("Workflow failed")
             state["error"] = str(e)
 

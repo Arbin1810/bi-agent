@@ -44,3 +44,5 @@ loguru==0.7.2
 
 pandasql>=0.7.3
 python-multipart
+
+pytest>=8.0.0

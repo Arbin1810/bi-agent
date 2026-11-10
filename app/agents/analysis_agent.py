@@ -109,8 +109,7 @@ class AnalysisAgent(BaseAgent):
             if deltas:
                 flat = []
                 for dim, entities in deltas.items():
-                    for d in entities[:3]:
-                        flat.append(d)
+                        flat.extend(entities[:3])
                 flat.sort(key=lambda d: d["absolute_change"])
 
                 findings = []
@@ -177,7 +176,7 @@ class AnalysisAgent(BaseAgent):
             try:
                 df = executor.execute(sql)
                 state["data"] = df
-            except Exception as e:
+            except Exception as e:   # noqa: BLE001 — SQL executor surface; log and continue
                 self.log(f"SQL failed: {e}")
 
         if df is None:

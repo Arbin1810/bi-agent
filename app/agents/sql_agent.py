@@ -1,18 +1,26 @@
-import json
 import re
+from typing import ClassVar
+
 from app.agents.base_agent import BaseAgent
-from config.prompts import SQL_GENERATION_PROMPT
-from app.data.connectors import db, DataFrameSQLExecutor
+from app.data.connectors import DataFrameSQLExecutor, db
 from app.utils.sql_safety import is_safe_sql
+from config.prompts import SQL_GENERATION_PROMPT
 
 
 class SQLAgent(BaseAgent):
     name = "SQLAgent"
 
+    # Dimensions we compute per-metric deltas for. Matches the six
+    # decomposition dimensions the SQL_GENERATION_PROMPT asks the LLM to
+    # produce, minus order_status (which only has cancel_rate as a
+    # meaningful metric).
+    METRIC_DIMENSIONS: ClassVar[list[str]] = [
+        "region", "product_id", "branch", "customer_segment"
+    ]
+
     def run(self, state: dict) -> dict:
         self.log("Generating SQL investigation plan")
 
-        # Pick executor
         if state.get("dataframe") is not None:
             executor = DataFrameSQLExecutor(state["dataframe"], table_name="transactions")
             state["_executor"] = executor
@@ -43,9 +51,7 @@ class SQLAgent(BaseAgent):
             state["sql_error"] = "No queries generated"
             return state
 
-        # Run each query, collect results
         results = []
-        executed = []
         for q in queries:
             sql = (q.get("sql") or "").strip()
             if not sql:
@@ -61,35 +67,43 @@ class SQLAgent(BaseAgent):
                     "rows": df.to_dict(orient="records"),
                     "columns": list(df.columns),
                 })
-                executed.append(q.get("purpose", "query"))
                 self.log(f"✓ {q.get('purpose','query')}: {len(df)} rows")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — individual query failure; log and continue
                 self.log(f"✗ Query failed ({q.get('purpose')}): {e}")
 
-        # ------------------------------------------------------------------
-        # HEADLINE ANCHOR: canonical target-vs-baseline totals.
-        # ------------------------------------------------------------------
+        # HEADLINE anchor
         headline = self._build_headline(state, executor)
         if headline is not None:
             results.insert(0, headline)
             self.log("✓ HEADLINE: canonical comparison totals computed")
 
-        # ------------------------------------------------------------------
-        # DIMENSION DELTAS: per-entity MoM deltas computed in Python.
-        # ------------------------------------------------------------------
-        deltas = self._build_dimension_deltas(results)
-        if deltas:
-            total_dims = sum(len(v) for v in deltas.values())
-            self.log(f"✓ DELTAS: {total_dims} entity deltas across {len(deltas)} dimensions")
+        # METRIC DELTAS — all four metrics × four dimensions
+        metric_deltas = self._build_all_metric_deltas(state, executor)
+        if metric_deltas:
+            total = sum(
+                len(ents)
+                for metric_table in metric_deltas.values()
+                for ents in metric_table.values()
+            )
+            self.log(
+                f"✓ METRIC DELTAS: {total} entity deltas across "
+                f"{len(metric_deltas)} metrics × "
+                f"{len(next(iter(metric_deltas.values())))} dimensions"
+            )
 
         state["sql"] = queries[0].get("sql") if queries else None
         state["sql_results"] = results
-        state["dimension_deltas"] = deltas
+        state["metric_deltas"] = metric_deltas
+        # Backward-compatible alias — downstream agents that only need
+        # revenue deltas read this.
+        state["dimension_deltas"] = metric_deltas.get("revenue", {})
         state["sql_explanation"] = gen.get("explanation", "")
         self.log(f"Executed {len(results)}/{len(queries)} queries")
         return state
 
-    # ----------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # HEADLINE: canonical four-metric totals for baseline vs target month
+    # ------------------------------------------------------------------
     def _build_headline(self, state: dict, executor) -> dict | None:
         intent = state.get("intent") or {}
         time_ref = (intent.get("time_reference") or "").strip()
@@ -112,7 +126,11 @@ class SQLAgent(BaseAgent):
                COUNT(*) AS txn_count,
                SUM(revenue) AS total_rev,
                AVG(revenue) AS aov,
-               SUM(CASE WHEN order_status = 'Cancelled' THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS cancel_rate
+               SUM(cost) AS total_cost,
+               SUM(cost) * 1.0 / NULLIF(SUM(revenue), 0) AS cost_ratio,
+               SUM(CASE WHEN order_status = 'Cancelled' THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS cancel_rate,
+               SUM(quantity) AS total_quantity,
+               AVG(quantity) AS avg_quantity
         FROM transactions
         WHERE strftime('%Y-%m', date) IN ('{b_str}', '{t_str}')
         GROUP BY month
@@ -129,66 +147,156 @@ class SQLAgent(BaseAgent):
                 "rows": df.to_dict(orient="records"),
                 "columns": list(df.columns),
             }
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — headline query best-effort; caller handles None
             self.log(f"Headline query failed: {e}")
             return None
 
-    # ----------------------------------------------------------------------
-    def _build_dimension_deltas(self, results: list) -> dict:
+    # ------------------------------------------------------------------
+    # METRIC DELTAS: per-metric, per-dimension MoM deltas
+    # ------------------------------------------------------------------
+    def _build_all_metric_deltas(self, state: dict, executor) -> dict:
         """
-        For each dimension query (columns like [entity, 'month', 'total']),
-        compute MoM deltas per entity in Python. Sort by most-negative
-        absolute_change and cap to top 10 per dimension.
+        For each (dimension, metric), compute per-entity MoM deltas.
+
+        Returns:
+            {
+              "revenue":    {"region": [entity_deltas...], "product_id": [...], ...},
+              "cost_ratio": {...},
+              "cancel_rate": {...},
+              "quantity":   {...}
+            }
+
+        Selection: per (metric, dimension) we keep the 30 entities that
+        moved the most in EITHER direction, by absolute magnitude of
+        absolute_change. Then we re-sort the kept entities by SIGNED
+        absolute_change ascending (most negative first) so downstream
+        consumers see the established convention.
+
+        Why absolute-magnitude selection: the previous version sorted by
+        signed absolute_change ascending and took [:30], which kept only
+        the 30 most-NEGATIVE entities. P007's cost_ratio anomaly is +17pp
+        (a positive outlier), so it was truncated out of the 50-product
+        dimension and A2 never detected. Selecting by magnitude keeps
+        both tails.
+
+        Ratio metrics store baseline_value / target_value as ratios
+        (0.75, 0.92) but absolute_change in percentage points
+        (+17.00), which matches what the report cites.
         """
-        deltas = {}
-        for r in results:
-            purpose = r.get("purpose", "")
-            if purpose.startswith("HEADLINE"):
+        intent = state.get("intent") or {}
+        time_ref = (intent.get("time_reference") or "").strip()
+        target = self._parse_month(time_ref)
+        if target is None:
+            return {}
+
+        y, m = target
+        base = (y - 1, 12) if m == 1 else (y, m - 1)
+        t_str = f"{y:04d}-{m:02d}"
+        b_str = f"{base[0]:04d}-{base[1]:02d}"
+
+        metric_deltas = {
+            "revenue":     {},
+            "cost_ratio":  {},
+            "cancel_rate": {},
+            "quantity":    {},
+        }
+
+        for dim in self.METRIC_DIMENSIONS:
+            sql = f"""
+            SELECT {dim} AS entity,
+                   strftime('%Y-%m', date) AS month,
+                   SUM(revenue) AS total_rev,
+                   SUM(cost) AS total_cost,
+                   SUM(quantity) AS total_qty,
+                   COUNT(*) AS txn_count,
+                   SUM(CASE WHEN order_status = 'Cancelled' THEN 1 ELSE 0 END) AS cancelled
+            FROM transactions
+            WHERE strftime('%Y-%m', date) IN ('{b_str}', '{t_str}')
+            GROUP BY {dim}, month
+            ORDER BY {dim}, month;
+            """.strip()
+
+            try:
+                df = executor.execute(sql)
+            except Exception as e:  # noqa: BLE001 — per-dimension query failure; log and continue
+                self.log(f"✗ Metric delta query failed for {dim}: {e}")
                 continue
-            cols = r.get("columns", [])
-            rows = r.get("rows", [])
-            if len(cols) < 3 or "month" not in cols or "total" not in cols:
-                continue
-            dim = cols[0]
-            if dim in ("month", "total"):
+
+            if df.empty:
                 continue
 
             pivot = {}
-            for row in rows:
-                ent = row.get(dim)
+            for row in df.to_dict(orient="records"):
+                ent = row.get("entity")
                 mo = row.get("month")
-                tot = row.get("total")
-                if ent is None or mo is None or tot is None:
+                if ent is None or mo is None:
                     continue
-                try:
-                    pivot.setdefault(ent, {})[mo] = float(tot)
-                except (TypeError, ValueError):
-                    continue
+                pivot.setdefault(ent, {})[mo] = row
 
-            entity_deltas = []
             for ent, months in pivot.items():
-                if len(months) < 2:
+                if b_str not in months or t_str not in months:
                     continue
-                sorted_m = sorted(months.items())
-                base_m, base_v = sorted_m[-2]
-                tgt_m, tgt_v = sorted_m[-1]
-                if base_v == 0:
-                    continue
-                entity_deltas.append({
-                    "entity": str(ent),
-                    "dimension": dim,
-                    "baseline_period": base_m,
-                    "target_period": tgt_m,
-                    "baseline_value": round(base_v, 2),
-                    "target_value": round(tgt_v, 2),
-                    "absolute_change": round(tgt_v - base_v, 2),
-                    "change_pct": round((tgt_v - base_v) / base_v * 100, 2),
-                })
+                base_row = months[b_str]
+                tgt_row  = months[t_str]
 
-            entity_deltas.sort(key=lambda d: d["absolute_change"])
-            deltas[dim] = entity_deltas[:10]
+                def _metric(row, metric):
+                    rev = float(row.get("total_rev") or 0)
+                    cost = float(row.get("total_cost") or 0)
+                    qty = float(row.get("total_qty") or 0)
+                    cnt = float(row.get("txn_count") or 0)
+                    canc = float(row.get("cancelled") or 0)
+                    if metric == "revenue":
+                        return rev
+                    if metric == "cost_ratio":
+                        return (cost / rev) if rev else None
+                    if metric == "cancel_rate":
+                        return (canc / cnt) if cnt else None
+                    if metric == "quantity":
+                        return (qty / cnt) if cnt else None
+                    return None
 
-        return deltas
+                for metric, deltas_for_metric in metric_deltas.items():
+                    base_v = _metric(base_row, metric)
+                    tgt_v  = _metric(tgt_row, metric)
+                    if base_v is None or tgt_v is None:
+                        continue
+
+                    abs_change = tgt_v - base_v
+                    if metric in ("cost_ratio", "cancel_rate"):
+                        abs_change_pp = round(abs_change * 100, 2)
+                    else:
+                        abs_change_pp = round(abs_change, 2)
+
+                    if base_v == 0:
+                        pct = None
+                    else:
+                        pct = round((tgt_v - base_v) / base_v * 100, 2)
+
+                    deltas_for_metric.setdefault(dim, []).append({
+                        "entity": str(ent),
+                        "dimension": dim,
+                        "metric": metric,
+                        "baseline_period": b_str,
+                        "target_period": t_str,
+                        "baseline_value": round(base_v, 4) if metric in ("cost_ratio", "cancel_rate") else round(base_v, 2),
+                        "target_value":   round(tgt_v, 4) if metric in ("cost_ratio", "cancel_rate") else round(tgt_v, 2),
+                        "absolute_change": abs_change_pp,
+                        "change_pct": pct,
+                    })
+
+        # FIX (Delivery 2): select entities by ABSOLUTE MAGNITUDE so
+        # positive outliers like P007's cost_ratio (+17pp) survive, then
+        # re-sort the kept entities by signed absolute_change ascending
+        # so the convention downstream consumers expect (most-negative
+        # first) is preserved.
+        for per_dim in metric_deltas.values():
+            for dim, table in per_dim.items():
+                table.sort(key=lambda d: abs(d["absolute_change"]), reverse=True)
+                kept = table[:30]
+                kept.sort(key=lambda d: d["absolute_change"])
+                per_dim[dim] = kept
+
+        return metric_deltas
 
     @staticmethod
     def _parse_month(text: str):

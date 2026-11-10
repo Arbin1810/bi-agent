@@ -1,20 +1,24 @@
-from datetime import datetime
-from pathlib import Path
-import pandas as pd
-import numpy as np
+from datetime import UTC, datetime
+
 import matplotlib
+import numpy as np
+import pandas as pd
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
-from config.settings import settings
+
 from app.utils.logger import logger
+from config.settings import settings
+
 
 def _save(fig, prefix: str) -> str:
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
     path = settings.charts_dir / f"{prefix}_{ts}.png"
     fig.savefig(path, bbox_inches="tight", dpi=100)
     plt.close(fig)
     return str(path)
+
 
 def generate_charts(df: pd.DataFrame, question: str = "") -> list[dict]:
     charts = []
@@ -32,8 +36,8 @@ def generate_charts(df: pd.DataFrame, question: str = "") -> list[dict]:
                     df[c] = parsed
                     datetime_cols = df.select_dtypes(include=["datetime", "datetimetz"])
                     break
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 — best-effort datetime column detection
+                logger.debug("datetime column detection failed: %s", exc)
 
     # Time series chart
     if not datetime_cols.empty and not numeric.empty:

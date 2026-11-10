@@ -1,8 +1,10 @@
 import json
+
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
-from config.settings import settings
+
 from app.utils.logger import logger
+from config.settings import settings
 
 
 class LLMClient:
@@ -82,8 +84,7 @@ class LLMClient:
             s = s.split("```", 2)
             if len(s) >= 2:
                 s = s[1]
-                if s.startswith("json"):
-                    s = s[4:]
+                s = s.removeprefix("json")
         s = s.strip()
 
         start = s.find("{")

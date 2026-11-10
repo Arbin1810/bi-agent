@@ -1,6 +1,7 @@
 from app.agents.base_agent import BaseAgent
 from config.prompts import CRITIC_PROMPT
 
+
 class CriticAgent(BaseAgent):
     name = "CriticAgent"
 

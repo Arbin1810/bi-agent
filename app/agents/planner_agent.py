@@ -1,6 +1,6 @@
 from app.agents.base_agent import BaseAgent
-from config.prompts import PLANNER_PROMPT
 from app.data.schema_introspector import introspector
+from config.prompts import PLANNER_PROMPT
 
 
 class PlannerAgent(BaseAgent):

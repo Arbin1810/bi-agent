@@ -1,5 +1,7 @@
-from typing import TypedDict, Any, Optional
+from typing import TypedDict
+
 import pandas as pd
+
 
 class WorkflowState(TypedDict, total=False):
     question: str
@@ -7,12 +9,12 @@ class WorkflowState(TypedDict, total=False):
     schema_context: str
     intent: dict
     plan: dict
-    sql: Optional[str]
+    sql: str | None
     sql_explanation: str
     sql_validation: dict
     sql_error: str
-    data: Optional[pd.DataFrame]
-    dataframe: Optional[pd.DataFrame]
+    data: pd.DataFrame | None
+    dataframe: pd.DataFrame | None
     stats: dict
     analysis: dict
     anomalies: dict

@@ -1,11 +1,10 @@
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.agents.base_agent import BaseAgent
 from config.prompts import REPORT_PROMPT
 from config.settings import settings
-
 
 KNOWN_SCENARIOS = [
     {"id": "A1", "dimension": "region", "entity": "Region_A",
@@ -56,9 +55,7 @@ class ReportAgent(BaseAgent):
 
         report = self.llm.complete(prompt, temperature=0.3)
 
-        # Deterministic rewrite: replace the entire Observed Changes section
-        # with a payload-derived version. Guarantees every number in that
-        # section comes from the payload, not from the LLM.
+        # Deterministic rewrite of Observed Changes
         deterministic_observed = self._rebuild_observed_changes(payload)
         report = self._replace_section(
             report, "## Observed Changes", deterministic_observed
@@ -66,29 +63,17 @@ class ReportAgent(BaseAgent):
 
         validation = self._validate_report(report, payload)
         if validation["placeholder_echoes"]:
-            self.log(
-                f"WARNING: report echoes placeholder keys: "
-                f"{validation['placeholder_echoes']}"
-            )
+            self.log(f"WARNING: report echoes placeholder keys: {validation['placeholder_echoes']}")
         if validation["untraceable_numbers"]:
-            self.log(
-                f"WARNING: report contains untraceable numbers: "
-                f"{validation['untraceable_numbers']}"
-            )
+            self.log(f"WARNING: report contains untraceable numbers: {validation['untraceable_numbers']}")
         if validation["untraceable_entities"]:
-            self.log(
-                f"WARNING: report names entities not in payload: "
-                f"{validation['untraceable_entities']}"
-            )
+            self.log(f"WARNING: report names entities not in payload: {validation['untraceable_entities']}")
         if validation["missing_scenario_disclaimers"]:
-            self.log(
-                f"WARNING: report omits undetected scenarios: "
-                f"{validation['missing_scenario_disclaimers']}"
-            )
+            self.log(f"WARNING: report omits undetected scenarios: {validation['missing_scenario_disclaimers']}")
         if validation["passed"]:
             self.log("Report traceability: PASSED")
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         out = settings.reports_dir / f"report_{ts}.md"
         out.write_text(report, encoding="utf-8")
 
@@ -98,23 +83,12 @@ class ReportAgent(BaseAgent):
         state["verified_payload"] = payload
         return state
 
-    # ----------------------------------------------------------
-    # Deterministic Observed Changes section (bypasses the LLM)
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     def _rebuild_observed_changes(self, payload: dict) -> str:
-        """
-        Build the Observed Changes section from payload["deltas"] only.
-        Every number is a verbatim payload value.
-
-        Iterates all dimensions present in payload["deltas"] and emits the
-        top-3 most-negative entity per dimension (per the payload's sort
-        order, which is most-negative first).
-        """
         lines = ["## Observed Changes"]
         any_emitted = False
 
         for dim, entities in payload.get("deltas", {}).items():
-            # Take top 3 (already sorted most-negative first)
             for e in entities[:3]:
                 entity = e.get("entity")
                 bv = e.get("baseline_value")
@@ -124,8 +98,6 @@ class ReportAgent(BaseAgent):
                 tp = e.get("target_period", "?")
                 if entity is None or bv is None or tv is None or pct is None:
                     continue
-                # Label the dimension so a reader knows which grouping
-                # each entity belongs to
                 lines.append(
                     f"- **{entity}** ({dim}): revenue went from "
                     f"${bv:,.2f} in {bp} to ${tv:,.2f} in {tp}, "
@@ -139,17 +111,10 @@ class ReportAgent(BaseAgent):
 
     @staticmethod
     def _replace_section(report: str, header: str, replacement: str) -> str:
-        """
-        Replace a whole `## Header` section (up to the next `##` or end of
-        report) with new content. Preserves everything before and after.
-        """
         if header not in report:
-            # Section missing — prepend after the title line (first #) or
-            # append at end.
             return report.rstrip() + "\n\n" + replacement + "\n"
 
         before, rest = report.split(header, 1)
-        # Find the next `## ` on its own line
         lines = rest.split("\n")
         next_idx = None
         for i, line in enumerate(lines):
@@ -157,19 +122,13 @@ class ReportAgent(BaseAgent):
                 next_idx = i
                 break
 
-        if next_idx is None:
-            after = ""
-        else:
-            after = "\n".join(lines[next_idx:])
-
+        after = "\n".join(lines[next_idx:]) if next_idx is not None else ""
         result = before + replacement
         if after:
             result += "\n\n" + after
         return result
 
-    # ----------------------------------------------------------
-    # Payload builder
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
     def _build_verified_payload(self, state: dict) -> dict:
         payload = {
             "headline": None,
@@ -179,6 +138,9 @@ class ReportAgent(BaseAgent):
             "known_scenarios": [],
             "mandatory_disclaimers": [],
             "known_limitations": [],
+            "gross_negative": None,
+            "positive_offset": None,
+            "net_revenue_change": None,
             "confidence": state.get("critique", {}).get("confidence", "medium"),
         }
 
@@ -193,19 +155,13 @@ class ReportAgent(BaseAgent):
                 "total_change_pct": os_.get("total_change_pct"),
                 "baseline_aov": os_.get("baseline_aov"),
                 "target_aov": os_.get("target_aov"),
-                "aov_change_pct": _pct_change(
-                    os_.get("baseline_aov"), os_.get("target_aov")
-                ),
+                "aov_change_pct": _pct_change(os_.get("baseline_aov"), os_.get("target_aov")),
                 "baseline_txn_count": os_.get("baseline_txn_count"),
                 "target_txn_count": os_.get("target_txn_count"),
-                "txn_change_pct": _pct_change(
-                    os_.get("baseline_txn_count"), os_.get("target_txn_count")
-                ),
+                "txn_change_pct": _pct_change(os_.get("baseline_txn_count"), os_.get("target_txn_count")),
                 "baseline_cancel_rate": os_.get("baseline_cancel_rate"),
                 "target_cancel_rate": os_.get("target_cancel_rate"),
-                "cancel_rate_change_pct": _pct_change(
-                    os_.get("baseline_cancel_rate"), os_.get("target_cancel_rate")
-                ),
+                "cancel_rate_change_pct": _pct_change(os_.get("baseline_cancel_rate"), os_.get("target_cancel_rate")),
             }
 
         for dim, entities in (state.get("dimension_deltas") or {}).items():
@@ -257,18 +213,40 @@ class ReportAgent(BaseAgent):
             if a.get("severity") in ("high", "medium")
         ]
 
-        computed = (state.get("anomalies") or {}).get("computed_statistics") or {}
-        computed_check = {
-            c.get("scenario_id"): c.get("detected_by_cross_entity_zscore")
-            for c in computed.get("known_scenario_check", [])
-        }
+        # Scenario detection — prefer state["scenario_detection"] (new
+        # metric-specific truth); fall back to legacy known_scenario_check.
+        scenario_detection = state.get("scenario_detection") or []
+        detection_by_id = {d["id"]: d for d in scenario_detection}
+
+        # Legacy path — for state produced before this delivery, or tests.
+        if not detection_by_id:
+            computed = (state.get("anomalies") or {}).get("computed_statistics") or {}
+            legacy = {
+                c.get("scenario_id"): c.get("detected_by_cross_entity_zscore")
+                for c in computed.get("known_scenario_check", [])
+            }
+            for s in KNOWN_SCENARIOS:
+                detection_by_id[s["id"]] = {
+                    "detected": legacy.get(s["id"], False),
+                    "metric": None,
+                    "baseline_value": None,
+                    "target_value": None,
+                    "delta_ratio": None,
+                    "evidence": None,
+                }
+
         payload["known_scenarios"] = [
             {
                 "id": s["id"],
                 "dimension": s["dimension"],
                 "entity": s["entity"],
                 "description": s["description"],
-                "detected": computed_check.get(s["id"]),
+                "detected": detection_by_id.get(s["id"], {}).get("detected", False),
+                "metric": detection_by_id.get(s["id"], {}).get("metric"),
+                "baseline_value": detection_by_id.get(s["id"], {}).get("baseline_value"),
+                "target_value": detection_by_id.get(s["id"], {}).get("target_value"),
+                "delta_ratio": detection_by_id.get(s["id"], {}).get("delta_ratio"),
+                "evidence": detection_by_id.get(s["id"], {}).get("evidence"),
             }
             for s in KNOWN_SCENARIOS
         ]
@@ -279,9 +257,11 @@ class ReportAgent(BaseAgent):
             if s["detected"] is False
         ]
 
-        payload["known_limitations"] = (
-            (state.get("root_causes") or {}).get("known_limitations", [])
-        )
+        rc = state.get("root_causes") or {}
+        payload["known_limitations"] = rc.get("known_limitations", [])
+        payload["gross_negative"] = rc.get("gross_negative")
+        payload["positive_offset"] = rc.get("positive_offset")
+        payload["net_revenue_change"] = rc.get("net_revenue_change")
 
         return payload
 
@@ -308,9 +288,6 @@ class ReportAgent(BaseAgent):
             return "(none \u2014 all known scenarios were detected)"
         return "\n".join(f"- {b}" for b in bullets)
 
-    # ----------------------------------------------------------
-    # Validation
-    # ----------------------------------------------------------
     def _validate_report(self, report: str, payload: dict) -> dict:
         report_lower = report.lower()
         placeholder_echoes = [
@@ -380,9 +357,6 @@ class ReportAgent(BaseAgent):
             if not m:
                 continue
             entity_name = m.group(1).strip().rstrip(":").strip()
-            # The rebuilt section wraps entity name in parens for dimension,
-            # but the bold text is only the entity name. Strip trailing
-            # "(dim)" if present.
             entity_name = re.sub(r"\s*\([^)]*\)\s*$", "", entity_name)
             if not entity_name:
                 continue
@@ -392,13 +366,9 @@ class ReportAgent(BaseAgent):
                 untraceable.append(entity_name)
         return untraceable
 
-    # ----------------------------------------------------------
-    # Number extractors
-    # ----------------------------------------------------------
     @staticmethod
     def _extract_claim_numbers(text: str) -> set:
         claims = set()
-
         def _normalize(s: str) -> str:
             s = (s.replace(",", "")
                  .replace("\u00a0", "")
@@ -410,15 +380,12 @@ class ReportAgent(BaseAgent):
             num = _normalize(m.group(1))
             if num and num.replace(".", "").isdigit():
                 claims.add(num)
-
         for m in re.finditer(r"[+-]?\s*\$\s*([\d,\.]+)", text):
             num = _normalize(m.group(1))
             if num and num.replace(".", "").isdigit():
                 claims.add(num)
-
         for m in re.finditer(r"[+-]?\d[\d,]*\.\d+", text):
             claims.add(_normalize(m.group(0)))
-
         return claims
 
     @staticmethod

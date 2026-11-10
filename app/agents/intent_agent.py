@@ -1,6 +1,7 @@
 from app.agents.base_agent import BaseAgent
 from config.prompts import INTENT_PROMPT
 
+
 class IntentAgent(BaseAgent):
     name = "IntentAgent"
 

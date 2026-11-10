@@ -1,4 +1,5 @@
 from openai import OpenAI
+
 from config.settings import settings
 
 kwargs = {"api_key": settings.openai_api_key}

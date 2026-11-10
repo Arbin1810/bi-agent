@@ -19,7 +19,6 @@ reconstructing a baseline from expected multipliers.
 """
 
 import json
-import os
 from pathlib import Path
 
 import numpy as np
@@ -272,7 +271,7 @@ metadata = {
         "A1_only": int(a1_only_mask.sum()),
         "A2_total": int(a2_mask.sum()),
         "A3_total": int(m_a3.sum()),
-        "A3_newly_cancelled": int(len(cancel_idx)),
+        "A3_newly_cancelled": len(cancel_idx),
         "A4_total": int(m_a4.sum()),
         "A4_unclamped": int(a4_unclamped_mask.sum()),
     },

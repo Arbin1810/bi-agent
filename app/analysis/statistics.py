@@ -1,12 +1,13 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+
 
 def summarize_dataframe(df: pd.DataFrame) -> dict:
     if df.empty:
         return {"rows": 0, "columns": list(df.columns)}
 
     summary = {
-        "rows": int(len(df)),
+        "rows": len(df),
         "columns": list(df.columns),
         "dtypes": {c: str(t) for c, t in df.dtypes.items()},
         "null_counts": {c: int(df[c].isna().sum()) for c in df.columns},

@@ -1,6 +1,7 @@
 from app.agents.base_agent import BaseAgent
 from app.visualization.charts import generate_charts
 
+
 class ChartAgent(BaseAgent):
     name = "ChartAgent"
 

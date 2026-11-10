@@ -1,5 +1,6 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
+
 
 def detect_anomalies(df: pd.DataFrame, z_threshold: float = 3.0, iqr_mult: float = 1.5) -> dict:
     """Detect anomalies in numeric columns using z-score and IQR."""
@@ -17,7 +18,7 @@ def detect_anomalies(df: pd.DataFrame, z_threshold: float = 3.0, iqr_mult: float
             outliers = s[np.abs(z) > z_threshold]
             if len(outliers):
                 result["zscore"][col] = {
-                    "count": int(len(outliers)),
+                    "count": len(outliers),
                     "values": outliers.head(10).tolist(),
                     "indices": outliers.index.tolist()[:10],
                 }
@@ -29,7 +30,7 @@ def detect_anomalies(df: pd.DataFrame, z_threshold: float = 3.0, iqr_mult: float
         iqr_out = s[(s < low) | (s > high)]
         if len(iqr_out):
             result["iqr"][col] = {
-                "count": int(len(iqr_out)),
+                "count": len(iqr_out),
                 "lower_bound": float(low),
                 "upper_bound": float(high),
                 "values": iqr_out.head(10).tolist(),

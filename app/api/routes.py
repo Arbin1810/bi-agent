@@ -1,11 +1,11 @@
 import shutil
-from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
+
+import pandas as pd
+from fastapi import APIRouter, File, Form, UploadFile
+
 from app.api.schemas import QueryRequest, QueryResponse
 from app.orchestration.workflow import workflow
-from app.data.file_handler import file_handler
 from config.settings import settings
-import pandas as pd
 
 router = APIRouter()
 
@@ -17,7 +17,7 @@ async def query(req: QueryRequest):
 @router.post("/query-with-files", response_model=QueryResponse)
 async def query_with_files(
     question: str = Form(...),
-    files: list[UploadFile] = File(default=[]),
+    files: list[UploadFile] = File(default=[]),   # noqa: B008 — FastAPI dependency injection
 ):
     uploaded = []
     df_for_analysis = None
@@ -36,7 +36,6 @@ async def query_with_files(
     return _serialize(state)
 
 def _serialize(state: dict) -> QueryResponse:
-    df = state.get("data")
     return QueryResponse(
         question=state.get("question", ""),
         intent=state.get("intent"),

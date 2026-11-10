@@ -1,8 +1,14 @@
-from pydantic_settings import BaseSettings
 from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+    )
+
     # ----- LLM -----
     openai_api_key: str = "ollama-local"          # ignored by Ollama; required by SDK
     openai_model: str = "llama3.1"                # must match `ollama list`
@@ -16,10 +22,6 @@ class Settings(BaseSettings):
     storage_path: str = "./storage"
     max_upload_size_mb: int = 100
     log_level: str = "INFO"
-
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
 
     @property
     def uploads_dir(self) -> Path:

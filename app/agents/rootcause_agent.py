@@ -16,6 +16,8 @@ class RootCauseAgent(BaseAgent):
                 headline = r
                 break
 
+        # Revenue deltas only — root cause is about revenue contribution.
+        # metric_deltas["revenue"] is aliased as state["dimension_deltas"].
         deltas = state.get("dimension_deltas") or {}
 
         prompt = ROOT_CAUSE_PROMPT.format(
@@ -27,38 +29,36 @@ class RootCauseAgent(BaseAgent):
         rc = self.llm.complete_json(prompt)
 
         # ----------------------------------------------------------
-        # OVERRIDE (Step 3.2 fixed): rebuild primary_causes from deltas,
-        # but compute contribution_pct WITHIN each dimension only.
-        #
-        # The previous version summed negative absolute_changes across
-        # ALL dimensions. That's invalid because dimensions overlap: a
-        # single transaction is in one region AND one product AND one
-        # branch AND one segment, so summing across dimensions counts
-        # the same revenue drop multiple times. Within a single
-        # dimension, entities are disjoint (each transaction has exactly
-        # one region), so the share is meaningful.
+        # OVERRIDE: rebuild primary_causes from deltas with COMPLETE
+        # denominators. The delta table is now sliced to [:30] per
+        # dimension (was [:10]), so all meaningful entities are present.
         # ----------------------------------------------------------
         flat = []
         for dim, entities in deltas.items():
-            for d in entities:
-                flat.append(d)
+                flat.extend(entities)
 
-        # Per-dimension denominators — entities within one dimension are
-        # disjoint, so their negative changes can be summed safely.
-        dim_total_neg = {}
+        # Per-dimension totals: negative (declines), positive (growth).
+        # These are the honest denominators for contribution_pct.
+        dim_stats = {}
         for dim, entities in deltas.items():
-            neg = sum(-d["absolute_change"] for d in entities if d["absolute_change"] < 0)
-            dim_total_neg[dim] = neg
+            total_neg = sum(-d["absolute_change"] for d in entities if d["absolute_change"] < 0)
+            total_pos = sum(d["absolute_change"] for d in entities if d["absolute_change"] > 0)
+            dim_stats[dim] = {
+                "total_negative": round(total_neg, 2),
+                "total_positive": round(total_pos, 2),
+                "net": round(total_pos - total_neg, 2),
+            }
+
+        # Aggregate across dimensions for the top-level summary.
+        gross_negative = sum(s["total_negative"] for s in dim_stats.values())
+        positive_offset = sum(s["total_positive"] for s in dim_stats.values())
 
         if flat:
             top = sorted(flat, key=lambda d: d["absolute_change"])[:5]
             primary = []
             for d in top:
                 dim = d["dimension"]
-                denom = dim_total_neg.get(dim, 0.0)
-                # Contribution is share of the *dimension's* total negative
-                # change, not the global total. This avoids the cross-
-                # dimension double-counting.
+                denom = dim_stats.get(dim, {}).get("total_negative", 0.0)
                 contribution = (
                     round(-d["absolute_change"] / denom * 100, 2)
                     if d["absolute_change"] < 0 and denom > 0 else 0.0
@@ -72,7 +72,7 @@ class RootCauseAgent(BaseAgent):
                     "absolute_change": d["absolute_change"],
                     "change_pct": d["change_pct"],
                     "contribution_pct": contribution,
-                    "contribution_basis": f"share of {dim} negative change",
+                    "contribution_basis": f"share of {dim} gross negative change",
                     "note": (
                         f"Dimension: {dim}. Observed change only; "
                         f"not additive with other dimensions."
@@ -81,14 +81,19 @@ class RootCauseAgent(BaseAgent):
                         f"{d['baseline_period']}: {d['baseline_value']:,.2f} → "
                         f"{d['target_period']}: {d['target_value']:,.2f}"
                     ),
-                    "confidence": "high" if abs(d["change_pct"]) > 15 else "medium",
+                    "confidence": "high" if abs(d["change_pct"] or 0) > 15 else "medium",
                 })
             rc["primary_causes"] = primary
             self.log(f"Root-cause override: {len(primary)} causes from deltas")
 
+        # Dimension-level statistics for the report
+        rc["dimension_totals"] = dim_stats
+        rc["gross_negative"] = round(gross_negative, 2)
+        rc["positive_offset"] = round(positive_offset, 2)
+        rc["net_revenue_change"] = round(positive_offset - gross_negative, 2)
+
+        # Limitations
         rc["known_limitations"] = rc.get("known_limitations") or []
-        # Add the cross-dimension disclaimer to every run, not just when
-        # the LLM happens to omit it.
         cross_dim_note = (
             "contribution_pct is measured within each dimension, not across "
             "dimensions. Dimensions overlap (each transaction belongs to one "
@@ -99,11 +104,34 @@ class RootCauseAgent(BaseAgent):
         if cross_dim_note not in rc["known_limitations"]:
             rc["known_limitations"].append(cross_dim_note)
 
+        revenue_only_note = (
+            "The anomaly detector z-scores revenue per entity. A pure margin "
+            "collapse (revenue unchanged, cost rising) would not be flagged "
+            "unless a separate cost-ratio delta is computed per entity."
+        )
+        if revenue_only_note not in rc["known_limitations"]:
+            rc["known_limitations"].append(revenue_only_note)
+
+        # New: gross vs net honesty
+        gross_net_note = (
+            f"Total gross negative change across dimensions: "
+            f"${gross_negative:,.2f}. Positive offsets (entities that grew): "
+            f"${positive_offset:,.2f}. Net revenue change: "
+            f"${rc['net_revenue_change']:,.2f}. Contribution percentages "
+            f"are of gross negative change, not of the net decline."
+        )
+        if gross_net_note not in rc["known_limitations"]:
+            rc["known_limitations"].append(gross_net_note)
+
         ALLOWED = {
             "primary_causes",
             "secondary_causes",
             "hypotheses_to_test",
             "known_limitations",
+            "dimension_totals",
+            "gross_negative",
+            "positive_offset",
+            "net_revenue_change",
         }
         rc = {k: v for k, v in rc.items() if k in ALLOWED}
 
